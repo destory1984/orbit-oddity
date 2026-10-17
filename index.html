@@ -19,6 +19,7 @@
 <div id="help">
 W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 방향키 기수 상하·좌우 · Q/E 회전(롤)<br>
+마우스: 화면 클릭 후 움직여 방향 · 왼쪽 버튼 전진 · 오른쪽 버튼 후진 · Esc 풀기<br>
 Z 보조 비행 켜기/끄기 · C 시점 · T 처음부터
 </div>
 <div id="msg"></div>
@@ -155,6 +156,20 @@ addEventListener('keydown', e => {
 addEventListener('keyup', e => keys.delete(e.code));
 const k = c => keys.has(c) ? 1 : 0;
 
+// mouse: click to lock pointer, movement steers, left button forward thrust, right button reverse
+let mouseDX = 0, mouseDY = 0;
+const MOUSE_SENS = 0.04;
+renderer.domElement.addEventListener('mousedown', e => {
+  if (document.pointerLockElement !== renderer.domElement) { renderer.domElement.requestPointerLock(); return; }
+  keys.add(e.button === 2 ? 'KeyS' : 'KeyW');
+});
+addEventListener('mouseup', e => keys.delete(e.button === 2 ? 'KeyS' : 'KeyW'));
+addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  mouseDX += e.movementX; mouseDY += e.movementY;
+});
+
 // ---- state ----
 let stationAngle = 0, holdTime = 0, docked = false, bumps = 0, startTime = 0, simTime = 0;
 const msg = document.getElementById('msg');
@@ -194,8 +209,9 @@ function step() {
     }
     shipBody.setLinvel({ x: vx, y: vy, z: vz }, true);
 
-    const pitch = k('ArrowUp') - k('ArrowDown');
-    const yaw = k('ArrowLeft') - k('ArrowRight');
+    const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS;
+    const yaw = k('ArrowLeft') - k('ArrowRight') - mouseDX * MOUSE_SENS;
+    mouseDX = 0; mouseDY = 0;
     const roll = k('KeyQ') - k('KeyE');
     const w = shipBody.angvel();
     tmpW.set(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT).applyQuaternion(tmpQ);
