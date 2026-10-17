@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit Oddity - 도킹 시험작</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; color: #cfe; }
+  #hud { position: fixed; top: 12px; left: 12px; font: 14px/1.6 ui-monospace, monospace; background: rgba(0,10,20,.6); padding: 10px 14px; border-radius: 6px; min-width: 240px; }
+  #hud .bad { color: #f86; } #hud .good { color: #6f8; } #hud .mid { color: #fd6; }
+  #help { position: fixed; bottom: 12px; left: 12px; font: 12px/1.5 ui-monospace, monospace; background: rgba(0,10,20,.6); padding: 8px 12px; border-radius: 6px; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; pointer-events: none; text-shadow: 0 0 8px #000; text-align: center; }
+  #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+</style>
+</head>
+<body>
+<div id="loading">불러오는 중...</div>
+<div id="hud"></div>
+<div id="help">
+W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
+방향키 기수 상하·좌우 · Q/E 회전(롤)<br>
+Z 보조 비행 켜기/끄기 · C 시점 · T 처음부터
+</div>
+<div id="msg"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import RAPIER from 'rapier';
+
+await RAPIER.init();
+document.getElementById('loading').remove();
+
+// ---- constants (meters, seconds) ----
+const EARTH_R = 6371e3;          // NASA planetary fact sheet, mean radius
+const ALT = 400e3;               // low Earth orbit altitude, same band as the ISS
+const SLOT_W = 24, SLOT_H = 8;   // docking slot opening
+const FACE = 60;                 // half size of the station face
+const DEPTH = 80;                // tunnel depth
+const SPIN = 2 * Math.PI / 30;   // station spin, one turn per 30 s
+const SHIP = { hx: 6, hy: 1, hz: 5 };
+const THRUST = 8, STRAFE = 5, ANG_ACC = 1.6, ANG_DAMP = 2.5, ASSIST_DAMP = 0.9;
+const DOCK_SPEED = 3, DOCK_HOLD = 1.5;
+const DT = 1 / 60;
+
+// ---- renderer / scene ----
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.5, 1e8);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.AmbientLight(0x334455, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 0.6, 0.8);
+scene.add(sun);
+
+// stars
+{
+  const n = 3000, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(5e7);
+    pos.set([v.x, v.y, v.z], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.5, sizeAttenuation: false })));
+}
+
+// Earth, real radius, station at real LEO altitude
+const earth = new THREE.Mesh(
+  new THREE.SphereGeometry(EARTH_R, 96, 48),
+  new THREE.MeshStandardMaterial({ color: 0x2a5d9f, roughness: 1 })
+);
+earth.position.set(0, -(EARTH_R + ALT), 0);
+scene.add(earth);
+
+// ---- physics ----
+const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
+world.timestep = DT;
+
+const stationBody = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
+const stationGroup = new THREE.Group();
+scene.add(stationGroup);
+const hullMat = new THREE.MeshStandardMaterial({ color: 0xb8bcc4, metalness: 0.4, roughness: 0.6 });
+const innerMat = new THREE.MeshStandardMaterial({ color: 0x556070, roughness: 0.8 });
+
+function stationBox(hx, hy, hz, x, y, z, mat = hullMat) {
+  world.createCollider(
+    RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setRestitution(0.5).setFriction(0.3),
+    stationBody
+  );
+  const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), mat);
+  m.position.set(x, y, z);
+  stationGroup.add(m);
+}
+{
+  const vh = (FACE - SLOT_H / 2) / 2, sw = (FACE - SLOT_W / 2) / 2;
+  stationBox(FACE, vh, DEPTH / 2, 0, SLOT_H / 2 + vh, -DEPTH / 2);
+  stationBox(FACE, vh, DEPTH / 2, 0, -(SLOT_H / 2 + vh), -DEPTH / 2);
+  stationBox(sw, SLOT_H / 2, DEPTH / 2, -(SLOT_W / 2 + sw), 0, -DEPTH / 2, innerMat);
+  stationBox(sw, SLOT_H / 2, DEPTH / 2, SLOT_W / 2 + sw, 0, -DEPTH / 2, innerMat);
+  stationBox(FACE, FACE, 2, 0, 0, -DEPTH - 2);
+}
+// slot frame lights: green on the long edges so the slot orientation reads at a distance
+{
+  const g = new THREE.BoxGeometry(SLOT_W, 0.6, 0.6);
+  const mat = new THREE.MeshBasicMaterial({ color: 0x33ff88 });
+  for (const s of [1, -1]) {
+    const m = new THREE.Mesh(g, mat); m.position.set(0, s * (SLOT_H / 2 + 0.4), 0.4); stationGroup.add(m);
+  }
+  const g2 = new THREE.BoxGeometry(0.6, SLOT_H, 0.6);
+  const red = new THREE.MeshBasicMaterial({ color: 0xff4444 });
+  for (const s of [1, -1]) {
+    const m = new THREE.Mesh(g2, red); m.position.set(s * (SLOT_W / 2 + 0.4), 0, 0.4); stationGroup.add(m);
+  }
+  const lamp = new THREE.PointLight(0x88ffcc, 400, 120);
+  lamp.position.set(0, 0, -DEPTH / 2); stationGroup.add(lamp);
+}
+
+// ship
+const shipBody = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setCcdEnabled(true));
+world.createCollider(RAPIER.ColliderDesc.cuboid(SHIP.hx, SHIP.hy, SHIP.hz).setRestitution(0.5).setFriction(0.3), shipBody);
+const shipGroup = new THREE.Group();
+{
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3, 2, 10), new THREE.MeshStandardMaterial({ color: 0xe8d8a0 }));
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(12, 0.4, 5), new THREE.MeshStandardMaterial({ color: 0xc87040 }));
+  wing.position.z = 1.5;
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 2), new THREE.MeshStandardMaterial({ color: 0x224466, emissive: 0x113355 }));
+  glass.position.set(0, 1.2, -2.5);
+  shipGroup.add(body, wing, glass);
+}
+scene.add(shipGroup);
+
+// ---- input ----
+const keys = new Set();
+let assist = true, cockpit = false;
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (e.code === 'KeyZ') assist = !assist;
+  if (e.code === 'KeyC') cockpit = !cockpit;
+  if (e.code === 'KeyT') reset();
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+const k = c => keys.has(c) ? 1 : 0;
+
+// ---- state ----
+let stationAngle = 0, holdTime = 0, docked = false, bumps = 0, startTime = 0, simTime = 0;
+const msg = document.getElementById('msg');
+
+function reset() {
+  shipBody.setTranslation({ x: 20, y: 30, z: 400 }, true);
+  shipBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+  shipBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+  shipBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  holdTime = 0; docked = false; bumps = 0; startTime = simTime;
+  msg.textContent = '';
+}
+reset();
+
+const eventQueue = new RAPIER.EventQueue(true);
+world.forEachCollider(c => c.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS));
+
+const tmpQ = new THREE.Quaternion(), tmpV = new THREE.Vector3(), tmpW = new THREE.Vector3();
+
+function step() {
+  simTime += DT;
+  stationAngle += SPIN * DT;
+  const sq = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), stationAngle);
+  stationBody.setNextKinematicRotation(sq);
+
+  if (!docked) {
+    const r = shipBody.rotation();
+    tmpQ.set(r.x, r.y, r.z, r.w);
+    const lin = (k('KeyS') - k('KeyW')) * THRUST;
+    const lx = (k('KeyD') - k('KeyA')) * STRAFE;
+    const ly = (k('KeyR') - k('KeyF')) * STRAFE;
+    const v = shipBody.linvel();
+    tmpV.set(lx, ly, lin).applyQuaternion(tmpQ).multiplyScalar(DT);
+    let vx = v.x + tmpV.x, vy = v.y + tmpV.y, vz = v.z + tmpV.z;
+    if (assist && lin === 0 && lx === 0 && ly === 0) {
+      const f = Math.exp(-ASSIST_DAMP * DT); vx *= f; vy *= f; vz *= f;
+    }
+    shipBody.setLinvel({ x: vx, y: vy, z: vz }, true);
+
+    const pitch = k('ArrowUp') - k('ArrowDown');
+    const yaw = k('ArrowLeft') - k('ArrowRight');
+    const roll = k('KeyQ') - k('KeyE');
+    const w = shipBody.angvel();
+    tmpW.set(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT).applyQuaternion(tmpQ);
+    const any = pitch || yaw || roll;
+    const f = any ? 1 : Math.exp(-ANG_DAMP * DT);
+    shipBody.setAngvel({ x: (w.x + tmpW.x) * f, y: (w.y + tmpW.y) * f, z: (w.z + tmpW.z) * f }, true);
+  } else {
+    // ride along with the station once docked
+    const p = new THREE.Vector3(0, 0, -DEPTH / 2).applyQuaternion(sq);
+    shipBody.setTranslation(p, true);
+    const dockQ = sq.clone();
+    shipBody.setRotation(dockQ, true);
+    shipBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    shipBody.setAngvel({ x: 0, y: 0, z: SPIN }, true);
+  }
+
+  world.step(eventQueue);
+  eventQueue.drainCollisionEvents((a, b, started) => { if (started && !docked) bumps++; });
+}
+
+// ---- docking metrics in the station frame ----
+function metrics() {
+  const sq = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), stationAngle);
+  const inv = sq.clone().invert();
+  const p = shipBody.translation(), v = shipBody.linvel();
+  const pos = new THREE.Vector3(p.x, p.y, p.z);
+  const local = pos.clone().applyQuaternion(inv);
+  // station surface velocity at the ship position: omega x r
+  const stV = new THREE.Vector3(0, 0, SPIN).cross(pos);
+  const rel = new THREE.Vector3(v.x, v.y, v.z).sub(stV);
+  const closing = -rel.z;
+
+  // roll alignment: ship x axis vs slot long axis, both projected onto the face plane
+  const r = shipBody.rotation();
+  const shipX = new THREE.Vector3(1, 0, 0).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w));
+  const slotX = new THREE.Vector3(1, 0, 0).applyQuaternion(sq);
+  let ang = Math.atan2(slotX.x * shipX.y - slotX.y * shipX.x, slotX.x * shipX.x + slotX.y * shipX.y) * 180 / Math.PI;
+  ang = ((ang + 90) % 180 + 180) % 180 - 90;
+  return { local, rel, closing, roll: ang, dist: pos.length() };
+}
+
+const hud = document.getElementById('hud');
+const cls = (x, good, mid) => x <= good ? 'good' : x <= mid ? 'mid' : 'bad';
+
+function updateHud(m) {
+  const sp = m.rel.length();
+  hud.innerHTML =
+    `정거장까지 &nbsp;${m.dist.toFixed(0)} m<br>` +
+    `상대 속도 &nbsp;&nbsp;<span class="${cls(sp, DOCK_SPEED, 10)}">${sp.toFixed(1)} m/s</span><br>` +
+    `접근 속도 &nbsp;&nbsp;${m.closing.toFixed(1)} m/s<br>` +
+    `회전 어긋남 <span class="${cls(Math.abs(m.roll), 8, 20)}">${m.roll.toFixed(0)}°</span><br>` +
+    `중심 어긋남 <span class="${cls(Math.hypot(m.local.x, m.local.y), 2, 6)}">${Math.hypot(m.local.x, m.local.y).toFixed(1)} m</span><br>` +
+    `보조 비행 &nbsp;&nbsp;${assist ? '<span class="good">켜짐</span>' : '<span class="mid">꺼짐</span>'}<br>` +
+    `부딪힌 횟수 ${bumps}`;
+}
+
+function checkDock(m) {
+  if (docked) return;
+  const inside = Math.abs(m.local.x) < SLOT_W / 2 && Math.abs(m.local.y) < SLOT_H / 2 &&
+    m.local.z < -15 && m.local.z > -DEPTH + 5;
+  if (inside && m.rel.length() < DOCK_SPEED) {
+    holdTime += DT;
+    msg.textContent = `정박 중... ${Math.max(0, DOCK_HOLD - holdTime).toFixed(1)}`;
+    if (holdTime >= DOCK_HOLD) {
+      docked = true;
+      msg.innerHTML = `도킹 완료<br><small style="font-size:16px">걸린 시간 ${(simTime - startTime).toFixed(0)}초 · 부딪힌 횟수 ${bumps}<br>T 를 누르면 다시</small>`;
+    }
+  } else {
+    if (holdTime > 0) msg.textContent = '';
+    holdTime = 0;
+  }
+}
+
+// ---- loop ----
+let acc = 0, last = performance.now();
+function frame(now) {
+  acc += Math.min(0.1, (now - last) / 1000); last = now;
+  while (acc >= DT) { step(); acc -= DT; checkDock(metrics()); }
+
+  stationGroup.quaternion.setFromAxisAngle(new THREE.Vector3(0, 0, 1), stationAngle);
+  const p = shipBody.translation(), r = shipBody.rotation();
+  shipGroup.position.set(p.x, p.y, p.z);
+  shipGroup.quaternion.set(r.x, r.y, r.z, r.w);
+
+  const off = cockpit ? new THREE.Vector3(0, 1.6, -3) : new THREE.Vector3(0, 5, 22);
+  camera.position.copy(off.applyQuaternion(shipGroup.quaternion).add(shipGroup.position));
+  camera.quaternion.copy(shipGroup.quaternion);
+  shipGroup.visible = !cockpit;
+
+  updateHud(metrics());
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
