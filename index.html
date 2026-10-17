@@ -20,6 +20,7 @@
 W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 방향키 기수 상하·좌우 · Q/E 회전(롤)<br>
 마우스: 화면 클릭 후 움직여 방향 · 왼쪽 버튼 전진 · 오른쪽 버튼 후진 · Esc 풀기<br>
+(커서가 안 잠기는 창에서는 버튼을 누른 채 화면 가운데에서 먼 쪽으로 커서를 두면 그쪽으로 돈다)<br>
 Z 보조 비행 켜기/끄기 · C 시점 · T 처음부터
 </div>
 <div id="msg"></div>
@@ -160,15 +161,27 @@ const k = c => keys.has(c) ? 1 : 0;
 let mouseDX = 0, mouseDY = 0;
 const MOUSE_SENS = 0.04;
 renderer.domElement.addEventListener('mousedown', e => {
-  if (document.pointerLockElement !== renderer.domElement) { renderer.domElement.requestPointerLock(); return; }
+  if (document.pointerLockElement !== renderer.domElement) {
+    // pointer lock is refused in some embeds; fall back to steering by cursor offset from the screen center
+    Promise.resolve(renderer.domElement.requestPointerLock?.()).catch(() => {});
+  }
   keys.add(e.button === 2 ? 'KeyS' : 'KeyW');
 });
 addEventListener('mouseup', e => keys.delete(e.button === 2 ? 'KeyS' : 'KeyW'));
 addEventListener('contextmenu', e => e.preventDefault());
+let cursorX = 0, cursorY = 0, mouseHeld = false;
+addEventListener('mousedown', () => { mouseHeld = true; });
+addEventListener('mouseup', () => { mouseHeld = false; });
 addEventListener('mousemove', e => {
+  cursorX = e.clientX / innerWidth * 2 - 1; cursorY = e.clientY / innerHeight * 2 - 1;
   if (document.pointerLockElement !== renderer.domElement) return;
   mouseDX += e.movementX; mouseDY += e.movementY;
 });
+function cursorSteer() {
+  if (document.pointerLockElement === renderer.domElement || !mouseHeld) return [0, 0];
+  const dz = v => Math.abs(v) < 0.1 ? 0 : Math.sign(v) * (Math.abs(v) - 0.1) / 0.9;
+  return [dz(cursorX), dz(cursorY)];
+}
 
 // ---- state ----
 let stationAngle = 0, holdTime = 0, docked = false, bumps = 0, startTime = 0, simTime = 0;
@@ -209,8 +222,9 @@ function step() {
     }
     shipBody.setLinvel({ x: vx, y: vy, z: vz }, true);
 
-    const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS;
-    const yaw = k('ArrowLeft') - k('ArrowRight') - mouseDX * MOUSE_SENS;
+    const [cx, cy] = cursorSteer();
+    const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS - cy;
+    const yaw = k('ArrowLeft') - k('ArrowRight') - mouseDX * MOUSE_SENS - cx;
     mouseDX = 0; mouseDY = 0;
     const roll = k('KeyQ') - k('KeyE');
     const w = shipBody.angvel();
