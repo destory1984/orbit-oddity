@@ -21,7 +21,8 @@ W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 방향키 기수 상하·좌우 · Q/E 회전(롤)<br>
 마우스: 화면 클릭 후 움직여 방향 · 왼쪽 버튼 전진 · 오른쪽 버튼 후진 · Esc 풀기<br>
 (커서가 안 잠기는 창에서는 버튼을 누른 채 화면 가운데에서 먼 쪽으로 커서를 두면 그쪽으로 돈다)<br>
-Z 보조 비행 켜기/끄기 · C 시점 · T 처음부터
+보조 비행이 켜져 있으면 정거장 400 m 안에서 롤을 저절로 맞춘다<br>
+X 도킹 컴퓨터 · Z 보조 비행 켜기/끄기 · C 시점 · T 처음부터
 </div>
 <div id="msg"></div>
 
@@ -41,10 +42,10 @@ document.getElementById('loading').remove();
 // ---- constants (meters, seconds) ----
 const EARTH_R = 6371e3;          // NASA planetary fact sheet, mean radius
 const ALT = 400e3;               // low Earth orbit altitude, same band as the ISS
-const SLOT_W = 24, SLOT_H = 8;   // docking slot opening
+const SLOT_W = 30, SLOT_H = 12;  // docking slot opening
 const FACE = 60;                 // half size of the station face
 const DEPTH = 80;                // tunnel depth
-const SPIN = 2 * Math.PI / 30;   // station spin, one turn per 30 s
+const SPIN = 2 * Math.PI / 60;   // station spin, one turn per 60 s
 const SHIP = { hx: 6, hy: 1, hz: 5 };
 const THRUST = 8, STRAFE = 5, ANG_ACC = 1.6, ANG_DAMP = 2.5, ASSIST_DAMP = 0.9;
 const DOCK_SPEED = 3, DOCK_HOLD = 1.5;
@@ -151,6 +152,7 @@ addEventListener('keydown', e => {
   keys.add(e.code);
   if (e.code === 'KeyZ') assist = !assist;
   if (e.code === 'KeyC') cockpit = !cockpit;
+  if (e.code === 'KeyX') autopilot = !autopilot;
   if (e.code === 'KeyT') reset();
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
@@ -192,7 +194,7 @@ function reset() {
   shipBody.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
   shipBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
   shipBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
-  holdTime = 0; docked = false; bumps = 0; startTime = simTime;
+  holdTime = 0; docked = false; bumps = 0; startTime = simTime; autopilot = false;
   msg.textContent = '';
 }
 reset();
@@ -231,7 +233,13 @@ function step() {
     tmpW.set(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT).applyQuaternion(tmpQ);
     const any = pitch || yaw || roll;
     const f = any ? 1 : Math.exp(-ANG_DAMP * DT);
-    shipBody.setAngvel({ x: (w.x + tmpW.x) * f, y: (w.y + tmpW.y) * f, z: (w.z + tmpW.z) * f }, true);
+    const av = { x: (w.x + tmpW.x) * f, y: (w.y + tmpW.y) * f, z: (w.z + tmpW.z) * f };
+    // assist: near the station and facing it, the ship turns with the slot so roll stays matched
+    const m = metrics();
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(tmpQ);
+    if (assist && !roll && m.dist < 400 && fwd.z < -0.7) av.z = SPIN - 2 * m.roll * Math.PI / 180;
+    shipBody.setAngvel(av, true);
+    if (autopilot) runAutopilot(sq, m);
   } else {
     // ride along with the station once docked
     const p = new THREE.Vector3(0, 0, -DEPTH / 2).applyQuaternion(sq);
@@ -244,6 +252,31 @@ function step() {
 
   world.step(eventQueue);
   eventQueue.drainCollisionEvents((a, b, started) => { if (started && !docked) bumps++; });
+}
+
+// ---- docking computer: lines up on the station axis, matches roll, flies in slowly ----
+var autopilot = false;  // var: reset() runs before this line
+function runAutopilot(sq, m) {
+  const r = shipBody.rotation();
+  const cur = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+  // the ship's rest orientation already faces -z with wings along x, so the target is the station rotation (or flipped 180°)
+  const flip = sq.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI));
+  const target = cur.angleTo(sq) < cur.angleTo(flip) ? sq : flip;
+  cur.rotateTowards(target, 0.8 * DT);
+  shipBody.setRotation(cur, true);
+  shipBody.setAngvel({ x: 0, y: 0, z: SPIN }, true);
+
+  const p = shipBody.translation(), v = shipBody.linvel();
+  const lateral = Math.hypot(p.x, p.y);
+  const clamp = (x, a) => Math.max(-a, Math.min(a, x));
+  const aligned = lateral < 1.5 && Math.abs(m.roll) < 4 && cur.angleTo(target) < 0.05;
+  let vz;
+  if (p.z > 80) vz = -clamp(0.1 * (p.z - 60), 25);       // approach to the hold point
+  else vz = aligned ? -2 : clamp(-(p.z - 70) * 0.3, 5);  // hold outside until lined up, then creep in
+  if (p.z < -DEPTH / 2) vz = 0;
+  const want = { x: clamp(-0.4 * p.x, 10), y: clamp(-0.4 * p.y, 10), z: vz };
+  const a = 1 - Math.exp(-2 * DT);
+  shipBody.setLinvel({ x: v.x + (want.x - v.x) * a, y: v.y + (want.y - v.y) * a, z: v.z + (want.z - v.z) * a }, true);
 }
 
 // ---- docking metrics in the station frame ----
@@ -279,6 +312,7 @@ function updateHud(m) {
     `회전 어긋남 <span class="${cls(Math.abs(m.roll), 8, 20)}">${m.roll.toFixed(0)}°</span><br>` +
     `중심 어긋남 <span class="${cls(Math.hypot(m.local.x, m.local.y), 2, 6)}">${Math.hypot(m.local.x, m.local.y).toFixed(1)} m</span><br>` +
     `보조 비행 &nbsp;&nbsp;${assist ? '<span class="good">켜짐</span>' : '<span class="mid">꺼짐</span>'}<br>` +
+    `도킹 컴퓨터 ${autopilot ? '<span class="good">작동 중</span>' : '꺼짐 (X)'}<br>` +
     `부딪힌 횟수 ${bumps}`;
 }
 
