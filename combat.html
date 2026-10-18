@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbit Oddity - 전투 시험작</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; color: #cfe; }
+  #hud { position: fixed; top: 12px; left: 12px; font: 14px/1.6 ui-monospace, monospace; background: rgba(0,10,20,.6); padding: 10px 14px; border-radius: 6px; min-width: 220px; }
+  .bar { display: inline-block; width: 120px; height: 8px; background: #233; vertical-align: middle; }
+  .bar i { display: block; height: 100%; }
+  #help { position: fixed; top: 12px; right: 12px; font: 12px/1.5 ui-monospace, monospace; background: rgba(0,10,20,.6); padding: 8px 12px; border-radius: 6px; text-align: right; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; pointer-events: none; text-shadow: 0 0 8px #000; text-align: center; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 24px; height: 24px; margin: -12px; border: 1px solid #6f8; border-radius: 50%; pointer-events: none; }
+  #radar { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); pointer-events: none; }
+  .tgt { position: fixed; width: 28px; height: 28px; margin: -14px; border: 1px solid #f86; pointer-events: none; font: 10px ui-monospace, monospace; color: #f86; }
+  .tgt span { position: absolute; top: 30px; left: 0; white-space: nowrap; }
+  @media (max-width: 700px) { #help { display: none; } }
+  #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+</style>
+</head>
+<body>
+<div id="loading">불러오는 중...</div>
+<div id="hud"></div>
+<div id="help">
+W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
+방향키·마우스 방향 · Q/E 롤<br>
+스페이스·왼쪽 버튼 레이저 · G 미사일<br>
+Z 보조 비행 · T 처음부터<br>
+(커서가 안 잠기는 창: 버튼을 누른 채 커서 쪽으로 돈다)
+</div>
+<div id="cross"></div>
+<canvas id="radar" width="320" height="140"></canvas>
+<div id="msg"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import RAPIER from 'rapier';
+
+await RAPIER.init();
+document.getElementById('loading').remove();
+
+const EARTH_R = 6371e3, ALT = 400e3;
+const DT = 1 / 60;
+const THRUST = 20, STRAFE = 10, ANG_ACC = 1.8, ANG_DAMP = 2.5, ASSIST_DAMP = 0.9;
+const LASER_RANGE = 1200, LASER_DMG = 8, LASER_COOLDOWN = 0.15;
+const MISSILE_SPEED = 140, MISSILE_TURN = 2.2, MISSILE_DMG = 70;
+const ENEMY = { speed: 55, turn: 1.3, cooldown: 0.5, dmg: 5, spread: 0.025, range: 900 };
+const _x = new THREE.Vector3(1, 0, 0), _y = new THREE.Vector3(0, 1, 0), _z = new THREE.Vector3(0, 0, 1);
+
+// ---- renderer / scene ----
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.5, 1e8);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+scene.add(new THREE.AmbientLight(0x334455, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 0.6, 0.8);
+scene.add(sun);
+{
+  const n = 3000, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(5e7);
+    pos.set([v.x, v.y, v.z], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 1.5, sizeAttenuation: false })));
+}
+const earth = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 96, 48), new THREE.MeshStandardMaterial({ color: 0x2a5d9f, roughness: 1 }));
+earth.position.set(0, -(EARTH_R + ALT), 0);
+scene.add(earth);
+
+// ---- physics ----
+const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
+world.timestep = DT;
+const owners = new Map(); // collider handle -> entity
+
+// station as cover, same shape as the docking prototype
+const STATION_POS = new THREE.Vector3(0, 0, -1200);
+const stationBody = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(STATION_POS.x, STATION_POS.y, STATION_POS.z));
+const stationGroup = new THREE.Group();
+stationGroup.position.copy(STATION_POS);
+scene.add(stationGroup);
+{
+  const mat = new THREE.MeshStandardMaterial({ color: 0xb8bcc4, metalness: 0.4, roughness: 0.6 });
+  const box = (hx, hy, hz, x, y, z) => {
+    owners.set(world.createCollider(RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setRestitution(0.5), stationBody).handle, { kind: 'station' });
+    const m = new THREE.Mesh(new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2), mat);
+    m.position.set(x, y, z); stationGroup.add(m);
+  };
+  box(60, 24, 40, 0, 36, -40); box(60, 24, 40, 0, -36, -40);
+  box(15, 6, 40, -45, 0, -40); box(15, 6, 40, 45, 0, -40); box(60, 60, 2, 0, 0, -82);
+}
+let stationAngle = 0;
+
+// ---- ships ----
+function makeShipMesh(bodyColor, wingColor) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(3, 2, 10), new THREE.MeshStandardMaterial({ color: bodyColor }));
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(12, 0.4, 5), new THREE.MeshStandardMaterial({ color: wingColor }));
+  wing.position.z = 1.5;
+  const glow = new THREE.Mesh(new THREE.BoxGeometry(2, 1, 0.3), new THREE.MeshBasicMaterial({ color: 0x66ccff }));
+  glow.position.z = 5.1;
+  g.add(body, wing, glow);
+  return g;
+}
+function makeShip(kind, pos, colors, hull, shield) {
+  const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z).setCcdEnabled(true));
+  const col = world.createCollider(RAPIER.ColliderDesc.cuboid(6, 1, 5).setRestitution(0.5), body);
+  const mesh = makeShipMesh(...colors);
+  scene.add(mesh);
+  const ship = { kind, body, col, mesh, hull, hullMax: hull, shield, shieldMax: shield, sinceHit: 9, cooldown: 0, alive: true };
+  owners.set(col.handle, ship);
+  return ship;
+}
+function removeShip(s) {
+  s.alive = false;
+  owners.delete(s.col.handle);
+  world.removeRigidBody(s.body);
+  scene.remove(s.mesh);
+}
+const quatOf = s => { const r = s.body.rotation(); return new THREE.Quaternion(r.x, r.y, r.z, r.w); };
+const posOf = s => { const p = s.body.translation(); return new THREE.Vector3(p.x, p.y, p.z); };
+const velOf = s => { const v = s.body.linvel(); return new THREE.Vector3(v.x, v.y, v.z); };
+
+function damage(s, amount) {
+  s.sinceHit = 0;
+  const absorbed = Math.min(s.shield, amount);
+  s.shield -= absorbed;
+  s.hull -= amount - absorbed;
+  if (s.hull <= 0 && s.alive) {
+    explode(posOf(s), s.kind === 'player' ? 0x88ccff : 0xffaa44);
+    if (s.kind === 'enemy') { kills++; removeShip(s); }
+    else { removeShip(s); msg.innerHTML = `격추당했습니다<br><small style="font-size:16px">격추 ${kills} · T 를 누르면 다시</small>`; }
+  }
+}
+
+// ---- effects ----
+const beams = [], blasts = [];
+function beam(from, to, color) {
+  const g = new THREE.BufferGeometry().setFromPoints([from, to]);
+  const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color }));
+  scene.add(l); beams.push({ l, t: 0.08 });
+}
+function explode(at, color) {
+  const n = 120, pos = new Float32Array(n * 3), vel = [];
+  for (let i = 0; i < n; i++) { pos.set([at.x, at.y, at.z], i * 3); vel.push(new THREE.Vector3().randomDirection().multiplyScalar(10 + Math.random() * 40)); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const p = new THREE.Points(g, new THREE.PointsMaterial({ color, size: 2, transparent: true }));
+  const light = new THREE.PointLight(color, 3000, 300); light.position.copy(at);
+  scene.add(p, light); blasts.push({ p, vel, light, t: 1.5 });
+}
+
+// ---- weapons ----
+function fireLaser(shooter, spread, dmg, color) {
+  const q = quatOf(shooter);
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  if (spread) dir.add(new THREE.Vector3().randomDirection().multiplyScalar(spread)).normalize();
+  const from = posOf(shooter).add(dir.clone().multiplyScalar(6));
+  const hit = world.castRay(new RAPIER.Ray(from, dir), LASER_RANGE, true, undefined, undefined, undefined, shooter.body);
+  const dist = hit ? (hit.toi ?? hit.timeOfImpact) : LASER_RANGE;
+  beam(from, from.clone().add(dir.clone().multiplyScalar(dist)), color);
+  if (hit) {
+    const target = owners.get(hit.collider.handle);
+    if (target && target.kind !== 'station' && target.alive) damage(target, dmg);
+  }
+}
+const missiles = [];
+const missileGeo = new THREE.ConeGeometry(0.6, 3, 6).rotateX(-Math.PI / 2);
+const missileMat = new THREE.MeshBasicMaterial({ color: 0xffee88 });
+function fireMissile() {
+  if (!player.alive || missileCount <= 0) return;
+  // lock the enemy closest to the crosshair
+  const q = quatOf(player), fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q), p = posOf(player);
+  let best = null, bestDot = 0.7;
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    const d = posOf(e).sub(p).normalize().dot(fwd);
+    if (d > bestDot) { bestDot = d; best = e; }
+  }
+  missileCount--;
+  const m = new THREE.Mesh(missileGeo, missileMat);
+  m.position.copy(p.add(fwd.clone().multiplyScalar(8)));
+  scene.add(m);
+  missiles.push({ m, vel: velOf(player).add(fwd.multiplyScalar(MISSILE_SPEED)), target: best, t: 10 });
+}
+function updateMissiles() {
+  for (const ms of missiles) {
+    ms.t -= DT;
+    if (ms.target?.alive) {
+      const want = posOf(ms.target).sub(ms.m.position).normalize().multiplyScalar(MISSILE_SPEED);
+      const cur = ms.vel.clone().normalize(), dst = want.clone().normalize();
+      const ang = cur.angleTo(dst);
+      if (ang > 1e-4) {
+        const axis = cur.clone().cross(dst).normalize();
+        ms.vel.copy(cur.applyAxisAngle(axis, Math.min(ang, MISSILE_TURN * DT)).multiplyScalar(MISSILE_SPEED));
+      }
+      if (ms.m.position.distanceTo(posOf(ms.target)) < 9) { damage(ms.target, MISSILE_DMG); explode(ms.m.position.clone(), 0xffee88); ms.t = 0; }
+    }
+    ms.m.position.addScaledVector(ms.vel, DT);
+    ms.m.lookAt(ms.m.position.clone().add(ms.vel));
+    ms.m.rotateY(Math.PI);
+    if (ms.t <= 0) scene.remove(ms.m);
+  }
+  for (let i = missiles.length - 1; i >= 0; i--) if (missiles[i].t <= 0) missiles.splice(i, 1);
+}
+
+// ---- enemy AI ----
+const lookM = new THREE.Matrix4();
+function updateEnemy(e) {
+  const p = posOf(e), q = quatOf(e), v = velOf(e);
+  const pp = posOf(player);
+  const toP = pp.clone().sub(p), dist = toP.length();
+  const fleeing = e.hull < e.hullMax * 0.3;
+  // aim where the player will be when the shot lands
+  const aim = fleeing ? p.clone().sub(toP) : pp.clone().addScaledVector(velOf(player), dist / 600);
+  if (!fleeing && dist < 120) aim.add(new THREE.Vector3(0, 80, 0).applyQuaternion(q)); // break off, don't ram
+  const target = new THREE.Quaternion().setFromRotationMatrix(lookM.lookAt(p, aim, new THREE.Vector3(0, 1, 0).applyQuaternion(q)));
+  q.rotateTowards(target, ENEMY.turn * DT);
+  e.body.setRotation(q, true);
+  e.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  const speed = fleeing ? ENEMY.speed * 1.2 : dist > 300 ? ENEMY.speed : ENEMY.speed * 0.6;
+  const want = fwd.clone().multiplyScalar(speed);
+  v.lerp(want, 1 - Math.exp(-1.2 * DT));
+  e.body.setLinvel(v, true);
+
+  e.cooldown -= DT;
+  if (!fleeing && player.alive && dist < ENEMY.range && e.cooldown <= 0 && fwd.angleTo(toP) < 0.12) {
+    e.cooldown = ENEMY.cooldown;
+    fireLaser(e, ENEMY.spread, ENEMY.dmg, 0xff5544);
+  }
+}
+
+// ---- input ----
+const keys = new Set();
+let assist = true;
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (e.code === 'KeyZ') assist = !assist;
+  if (e.code === 'KeyT') reset();
+  if (e.code === 'KeyG') fireMissile();
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+const k = c => keys.has(c) ? 1 : 0;
+
+let mouseDX = 0, mouseDY = 0, cursorX = 0, cursorY = 0, mouseHeld = false;
+const MOUSE_SENS = 0.04;
+renderer.domElement.addEventListener('mousedown', e => {
+  if (document.pointerLockElement !== renderer.domElement)
+    Promise.resolve(renderer.domElement.requestPointerLock?.()).catch(() => {});
+  if (e.button === 0) mouseHeld = true;
+  if (e.button === 2) fireMissile();
+});
+addEventListener('mouseup', e => { if (e.button === 0) mouseHeld = false; });
+addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('mousemove', e => {
+  cursorX = e.clientX / innerWidth * 2 - 1; cursorY = e.clientY / innerHeight * 2 - 1;
+  if (document.pointerLockElement !== renderer.domElement) return;
+  mouseDX += e.movementX; mouseDY += e.movementY;
+});
+function cursorSteer() {
+  if (document.pointerLockElement === renderer.domElement || !mouseHeld) return [0, 0];
+  const dz = v => Math.abs(v) < 0.1 ? 0 : Math.sign(v) * (Math.abs(v) - 0.1) / 0.9;
+  return [dz(cursorX), dz(cursorY)];
+}
+
+// ---- game state ----
+let player, enemies = [], kills = 0, wave = 0, missileCount = 0, laserCd = 0, waveDelay = 0;
+const msg = document.getElementById('msg');
+
+function spawnWave() {
+  wave++;
+  const n = 1 + wave;
+  for (let i = 0; i < n; i++) {
+    const dir = new THREE.Vector3().randomDirection();
+    dir.z = -Math.abs(dir.z) - 0.5;
+    const pos = posOf(player).add(dir.normalize().multiplyScalar(700 + Math.random() * 400));
+    enemies.push(makeShip('enemy', pos, [0x803030, 0x402020], 40, 30));
+  }
+  missileCount = Math.min(missileCount + 2, 6);
+  msg.textContent = `${wave}번째 무리 ${n}척`;
+  setTimeout(() => { if (msg.textContent.endsWith('척')) msg.textContent = ''; }, 2000);
+}
+function reset() {
+  if (player?.alive) removeShip(player);
+  for (const e of enemies) if (e.alive) removeShip(e);
+  for (const ms of missiles) scene.remove(ms.m);
+  missiles.length = 0;
+  enemies = []; kills = 0; wave = 0; missileCount = 2; msg.textContent = '';
+  player = makeShip('player', new THREE.Vector3(0, 0, 0), [0xe8d8a0, 0xc87040], 100, 60);
+  spawnWave();
+}
+reset();
+
+function step() {
+  stationAngle += 2 * Math.PI / 60 * DT;
+  stationBody.setNextKinematicRotation(new THREE.Quaternion().setFromAxisAngle(_z, stationAngle));
+
+  if (player.alive) {
+    const q = quatOf(player);
+    const lin = (k('KeyS') - k('KeyW')) * THRUST, lx = (k('KeyD') - k('KeyA')) * STRAFE, ly = (k('KeyR') - k('KeyF')) * STRAFE;
+    const v = velOf(player).add(new THREE.Vector3(lx, ly, lin).applyQuaternion(q).multiplyScalar(DT));
+    if (assist && !lin && !lx && !ly) v.multiplyScalar(Math.exp(-ASSIST_DAMP * DT));
+    player.body.setLinvel(v, true);
+
+    const [cx, cy] = cursorSteer();
+    const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS - cy;
+    const yaw = k('ArrowLeft') - k('ArrowRight') - mouseDX * MOUSE_SENS - cx;
+    const roll = k('KeyQ') - k('KeyE');
+    mouseDX = 0; mouseDY = 0;
+    const w = player.body.angvel();
+    const add = new THREE.Vector3(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT).applyQuaternion(q);
+    const f = (pitch || yaw || roll) ? 1 : Math.exp(-ANG_DAMP * DT);
+    player.body.setAngvel({ x: (w.x + add.x) * f, y: (w.y + add.y) * f, z: (w.z + add.z) * f }, true);
+
+    laserCd -= DT;
+    if ((k('Space') || mouseHeld) && laserCd <= 0) { laserCd = LASER_COOLDOWN; fireLaser(player, 0, LASER_DMG, 0x66ff88); }
+  }
+
+  for (const s of [player, ...enemies]) {
+    if (!s.alive) continue;
+    s.sinceHit += DT;
+    if (s.sinceHit > 2) s.shield = Math.min(s.shieldMax, s.shield + 6 * DT);
+    if (s.kind === 'enemy') updateEnemy(s);
+  }
+  updateMissiles();
+  world.step();
+
+  enemies = enemies.filter(e => e.alive);
+  if (player.alive && enemies.length === 0) {
+    waveDelay += DT;
+    if (waveDelay > 3) { waveDelay = 0; spawnWave(); }
+  }
+}
+
+// ---- HUD, radar, target boxes ----
+const hud = document.getElementById('hud');
+const bar = (v, max, color) => `<span class="bar"><i style="width:${Math.max(0, v / max * 100)}%;background:${color}"></i></span>`;
+const radar = document.getElementById('radar'), rc = radar.getContext('2d');
+const tgtDivs = [];
+function drawOverlay() {
+  const pa = player.alive;
+  hud.innerHTML =
+    `방패 ${bar(pa ? player.shield : 0, player.shieldMax, '#4af')}<br>` +
+    `선체 ${bar(pa ? player.hull : 0, player.hullMax, '#f84')}<br>` +
+    `속도 ${pa ? velOf(player).length().toFixed(0) : 0} m/s<br>` +
+    `미사일 ${'▲'.repeat(missileCount)}${'·'.repeat(6 - missileCount)}<br>` +
+    `격추 ${kills} · 무리 ${wave}<br>` +
+    `보조 비행 ${assist ? '켜짐' : '꺼짐'}`;
+
+  // Elite-style scanner: ellipse is the ship's horizontal plane, sticks show height
+  const W = radar.width, H = radar.height, R = 3000;
+  rc.clearRect(0, 0, W, H);
+  rc.strokeStyle = 'rgba(100,255,160,.5)'; rc.fillStyle = 'rgba(0,30,20,.4)';
+  rc.beginPath(); rc.ellipse(W / 2, H / 2, W / 2 - 4, H / 2 - 4, 0, 0, Math.PI * 2); rc.fill(); rc.stroke();
+  rc.beginPath(); rc.moveTo(W / 2, 4); rc.lineTo(W / 2, H - 4); rc.moveTo(4, H / 2); rc.lineTo(W - 4, H / 2); rc.stroke();
+  const ws = tgtDivs.length;
+  if (!pa) return;
+  const inv = quatOf(player).invert(), pp = posOf(player);
+  const blips = enemies.map(e => ({ p: posOf(e), c: '#f66' })).concat([{ p: STATION_POS.clone(), c: '#6cf' }], missiles.map(m => ({ p: m.m.position, c: '#ff8' })));
+  for (const b of blips) {
+    const l = b.p.clone().sub(pp).applyQuaternion(inv);
+    const s = Math.min(1, l.length() / R) / (l.length() || 1);
+    const x = W / 2 + l.x * s * (W / 2 - 6), y = H / 2 + l.z * s * (H / 2 - 6), h = -l.y * s * (H / 2 - 6);
+    rc.strokeStyle = b.c; rc.fillStyle = b.c;
+    rc.beginPath(); rc.moveTo(x, y); rc.lineTo(x, y + h); rc.stroke();
+    rc.fillRect(x - 3, y + h - 2, 6, 3);
+  }
+
+  // boxes around enemies on screen
+  let i = 0;
+  for (const e of enemies) {
+    const p = posOf(e), sp = p.clone().project(camera);
+    const div = tgtDivs[i] ?? (tgtDivs[i] = Object.assign(document.createElement('div'), { className: 'tgt', innerHTML: '<span></span>' }));
+    if (!div.isConnected) document.body.appendChild(div);
+    const on = sp.z < 1 && Math.abs(sp.x) < 1 && Math.abs(sp.y) < 1;
+    div.style.display = on ? 'block' : 'none';
+    div.style.left = `${(sp.x + 1) / 2 * innerWidth}px`; div.style.top = `${(1 - sp.y) / 2 * innerHeight}px`;
+    div.firstChild.textContent = `${p.distanceTo(pp).toFixed(0)}m ${'|'.repeat(Math.ceil(e.hull / 10))}`;
+    i++;
+  }
+  for (; i < ws; i++) tgtDivs[i].style.display = 'none';
+}
+
+// ---- loop ----
+let acc = 0, last = performance.now();
+const camAnchor = { pos: new THREE.Vector3(), quat: new THREE.Quaternion() };
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  acc += dt;
+  while (acc >= DT) { step(); acc -= DT; }
+
+  stationGroup.quaternion.setFromAxisAngle(_z, stationAngle);
+  for (const s of [player, ...enemies]) {
+    if (!s.alive) continue;
+    const p = s.body.translation(), r = s.body.rotation();
+    s.mesh.position.set(p.x, p.y, p.z); s.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+  }
+  if (player.alive) { camAnchor.pos.copy(player.mesh.position); camAnchor.quat.copy(player.mesh.quaternion); }
+  camera.position.copy(new THREE.Vector3(0, 4, 20).applyQuaternion(camAnchor.quat).add(camAnchor.pos));
+  camera.quaternion.copy(camAnchor.quat);
+
+  for (const b of beams) { b.t -= dt; if (b.t <= 0) { scene.remove(b.l); b.l.geometry.dispose(); } }
+  for (let i = beams.length - 1; i >= 0; i--) if (beams[i].t <= 0) beams.splice(i, 1);
+  for (const b of blasts) {
+    b.t -= dt;
+    const a = b.p.geometry.attributes.position;
+    for (let i = 0; i < b.vel.length; i++) a.setXYZ(i, a.getX(i) + b.vel[i].x * dt, a.getY(i) + b.vel[i].y * dt, a.getZ(i) + b.vel[i].z * dt);
+    a.needsUpdate = true;
+    b.p.material.opacity = Math.max(0, b.t / 1.5); b.light.intensity = 3000 * Math.max(0, b.t - 1);
+    if (b.t <= 0) scene.remove(b.p, b.light);
+  }
+  for (let i = blasts.length - 1; i >= 0; i--) if (blasts[i].t <= 0) blasts.splice(i, 1);
+
+  drawOverlay();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
