@@ -16,6 +16,7 @@
   .tgt { position: fixed; width: 28px; height: 28px; margin: -14px; border: 1px solid #f86; pointer-events: none; font: 10px ui-monospace, monospace; color: #f86; }
   .tgt span { position: absolute; top: 30px; left: 0; white-space: nowrap; }
   #nose { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px; background: rgba(100,255,140,.6); border-radius: 50%; pointer-events: none; }
+  #dead { position: fixed; left: 44%; top: 44%; width: 12%; height: 12%; border: 1px dashed rgba(100,255,140,.25); border-radius: 50%; pointer-events: none; }
   #stick { position: fixed; display: none; width: 120px; height: 120px; margin: -60px; border: 2px solid rgba(150,220,255,.35); border-radius: 50%; pointer-events: none; }
   #knob { position: absolute; left: 40px; top: 40px; width: 40px; height: 40px; border-radius: 50%; background: rgba(150,220,255,.4); }
   #touchUi { display: none; position: fixed; right: 12px; bottom: 12px; flex-direction: column; gap: 10px; align-items: flex-end; }
@@ -46,6 +47,7 @@ C 누르고 있기: 내 배 둘러보기<br>
 Z 보조 비행 · M 소리 끄기 · T 처음부터
 </div>
 <div id="nose"></div>
+<div id="dead"></div>
 <div id="cross"></div>
 <div id="stick"><div id="knob"></div></div>
 <div id="touchUi">
@@ -384,6 +386,7 @@ function fireLaser(shooter, spread, dmg, color) {
 }
 // aim assist: the player's laser bends toward the enemy nearest the aim point inside this cone
 const AIM_CONE = 0.07; // rad, about 4 degrees
+const DEADZONE = 0.12; // aim offset (fraction of half screen) that does not turn the ship
 const AIM_RATE = 1.4;  // rad/s turn rate with the aim point at the screen edge
 function assistTarget() {
   if (!player?.alive) return null;
@@ -506,7 +509,11 @@ addEventListener('pointermove', e => {
   if (mouseMode === 'relative') { if (locked()) { relDX += e.movementX; relDY += e.movementY; } return; }
   aimX = e.clientX / innerWidth * 2 - 1; aimY = e.clientY / innerHeight * 2 - 1;
 });
-document.addEventListener('mouseleave', () => { if (mouseMode === 'cursor' && !usedTouch) aimX = aimY = 0; });
+// cursor left the window or the window lost focus: stop turning
+const recenter = () => { if (mouseMode === 'cursor' && !usedTouch) aimX = aimY = 0; };
+document.documentElement.addEventListener('mouseleave', recenter);
+addEventListener('mouseout', e => { if (!e.relatedTarget) recenter(); });
+addEventListener('blur', () => { recenter(); keys.clear(); });
 
 // touch: left half is a thrust stick, right half drags the aim point (springs back on release)
 let stickX = 0, stickY = 0;
@@ -622,7 +629,7 @@ function step() {
     const w = player.body.angvel();
     const wl = new THREE.Vector3(w.x, w.y, w.z).applyQuaternion(qi);
     wl.add(new THREE.Vector3(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT));
-    const dz = v => Math.abs(v) < 0.06 ? 0 : Math.sign(v) * (Math.abs(v) - 0.06) / 0.94;
+    const dz = v => Math.abs(v) < DEADZONE ? 0 : Math.sign(v) * (Math.abs(v) - DEADZONE) / (1 - DEADZONE);
     const ax = dz(aimX), ay = dz(aimY);
     const blend = 1 - Math.exp(-6 * DT), damp = Math.exp(-ANG_DAMP * DT);
     if (ax || ay) { wl.x += (-ay * AIM_RATE - wl.x) * blend; wl.y += (-ax * AIM_RATE - wl.y) * blend; }
@@ -698,7 +705,7 @@ function drawOverlay() {
   const ap = posOf(player).addScaledVector(aimDir(), 500).project(camera);
   Object.assign(cross.style, {
     width: `${cr * 2}px`, height: `${cr * 2}px`, margin: `-${cr}px`, borderColor: locked ? '#6f8' : 'rgba(100,255,140,.35)',
-    left: `${(ap.x + 1) / 2 * innerWidth}px`, top: `${(1 - ap.y) / 2 * innerHeight}px`,
+    left: `${Math.max(0, Math.min(innerWidth, (ap.x + 1) / 2 * innerWidth))}px`, top: `${Math.max(0, Math.min(innerHeight, (1 - ap.y) / 2 * innerHeight))}px`,
   });
   let i = 0;
   for (const e of enemies) {
