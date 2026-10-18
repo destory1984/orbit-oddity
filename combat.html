@@ -230,7 +230,7 @@ function fireLaser(shooter, spread, dmg, color) {
   }
 }
 // aim assist: the player's laser bends toward the enemy nearest the crosshair inside this cone
-const AIM_CONE = 0.14; // rad, about 8 degrees
+const AIM_CONE = 0.07; // rad, about 4 degrees
 function assistTarget() {
   if (!player?.alive) return null;
   const p = posOf(player), fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(quatOf(player));
