@@ -42,6 +42,7 @@ W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 마우스: 커서 쪽으로 배가 돈다 · 방향키도 된다 · Q/E 롤<br>
 스페이스 레이저 · G·오른쪽 버튼 미사일<br>
 V 마우스 방식 바꾸기(커서 따라가기 ↔ 움직인 만큼)<br>
+C 누르고 있기: 내 배 둘러보기<br>
 Z 보조 비행 · M 소리 끄기 · T 처음부터
 </div>
 <div id="nose"></div>
@@ -60,12 +61,14 @@ Z 보조 비행 · M 소리 끄기 · T 처음부터
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
   "rapier": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/rapier.es.js"
 } }
 </script>
 <script type="module">
 import * as THREE from 'three';
 import RAPIER from 'rapier';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 await RAPIER.init();
 document.getElementById('loading').remove();
@@ -89,7 +92,10 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-scene.add(new THREE.AmbientLight(0x334455, 1.2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+// soft studio reflections so the metal hull has something to mirror
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.AmbientLight(0x334455, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(1, 0.6, 0.8);
 scene.add(sun);
@@ -131,15 +137,138 @@ scene.add(stationGroup);
 let stationAngle = 0;
 
 // ---- ships ----
-function makeShipMesh(bodyColor, wingColor) {
+// Procedural hull skin drawn on a canvas: plates, panel lines, rivets, a stripe and a registration mark.
+// Returns color and roughness maps so worn plates read as duller metal.
+const css = c => '#' + c.toString(16).padStart(6, '0');
+function hullTextures(base, accent, label, seed = 1) {
+  let s = seed;
+  const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  const N = 1024;
+  const col = document.createElement('canvas'), rough = document.createElement('canvas');
+  col.width = col.height = rough.width = rough.height = N;
+  const c = col.getContext('2d'), r = rough.getContext('2d');
+  c.fillStyle = css(base); c.fillRect(0, 0, N, N);
+  r.fillStyle = '#8c8c8c'; r.fillRect(0, 0, N, N);
+  // plates: recursive split, each plate slightly different tone and roughness
+  const plate = (x, y, w, h, d) => {
+    if (d < 4 && (w > 90 || h > 90) && rnd() < 0.85) {
+      if (w > h) { const k = w * (0.3 + rnd() * 0.4); plate(x, y, k, h, d + 1); plate(x + k, y, w - k, h, d + 1); }
+      else { const k = h * (0.3 + rnd() * 0.4); plate(x, y, w, k, d + 1); plate(x, y + k, w, h - k, d + 1); }
+      return;
+    }
+    const t = (rnd() - 0.5) * 26;
+    c.fillStyle = `rgba(${t > 0 ? '255,255,255' : '0,0,0'},${Math.abs(t) / 255})`; c.fillRect(x, y, w, h);
+    const g = 110 + rnd() * 70 | 0; r.fillStyle = `rgb(${g},${g},${g})`; r.fillRect(x, y, w, h);
+    c.strokeStyle = 'rgba(0,0,0,.45)'; c.lineWidth = 2; c.strokeRect(x + 1, y + 1, w - 2, h - 2);
+    c.strokeStyle = 'rgba(255,255,255,.12)'; c.lineWidth = 1; c.strokeRect(x + 3, y + 3, w - 6, h - 6);
+    r.strokeStyle = '#ddd'; r.lineWidth = 3; r.strokeRect(x + 1, y + 1, w - 2, h - 2);
+    c.fillStyle = 'rgba(0,0,0,.35)';
+    for (let i = 8; i < w - 4; i += 18) { c.fillRect(x + i, y + 5, 2, 2); c.fillRect(x + i, y + h - 7, 2, 2); }
+  };
+  plate(0, 0, N, N, 0);
+  // grime streaks
+  for (let i = 0; i < 60; i++) {
+    c.fillStyle = `rgba(30,25,20,${0.03 + rnd() * 0.05})`;
+    c.fillRect(rnd() * N, rnd() * N, 2 + rnd() * 6, 40 + rnd() * 160);
+  }
+  // racing stripes and hazard chevrons
+  c.fillStyle = css(accent); c.fillRect(0, N * 0.44, N, N * 0.05); c.fillRect(0, N * 0.51, N, N * 0.015);
+  r.fillStyle = '#5a5a5a'; r.fillRect(0, N * 0.44, N, N * 0.085);
+  c.save(); c.beginPath(); c.rect(0, N * 0.86, N, N * 0.04); c.clip();
+  for (let x = -40; x < N; x += 40) { c.fillStyle = (x / 40) % 2 ? '#222' : '#e8c040'; c.beginPath(); c.moveTo(x, N * 0.9); c.lineTo(x + 20, N * 0.86); c.lineTo(x + 40, N * 0.86); c.lineTo(x + 20, N * 0.9); c.fill(); }
+  c.restore();
+  // registration
+  c.font = `bold ${N * 0.07}px ui-monospace, monospace`; c.fillStyle = 'rgba(20,20,30,.85)';
+  c.fillText(label, N * 0.06, N * 0.38); c.fillText(label, N * 0.6, N * 0.38);
+  const mk = cv => { const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; return t; };
+  const map = mk(col); map.colorSpace = THREE.SRGBColorSpace;
+  return { map, roughnessMap: mk(rough) };
+}
+const glowTex = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+  const c = cv.getContext('2d'), g = c.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.2, 'rgba(140,210,255,.9)'); g.addColorStop(0.5, 'rgba(60,120,255,.35)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(cv);
+})();
+const shipSkins = new Map();
+// Ship faces -z, about 12 m wingspan and 10 m long, to match the 6x1x5 half-extent collider.
+function makeShipMesh(base, accent, label) {
+  const key = `${base}-${accent}-${label}`;
+  if (!shipSkins.has(key)) {
+    const tex = hullTextures(base, accent, label, base % 997 + 7);
+    shipSkins.set(key, {
+      hull: new THREE.MeshStandardMaterial({ ...tex, metalness: 0.55, roughness: 1, envMapIntensity: 1.2 }),
+      dark: new THREE.MeshStandardMaterial({ color: 0x2a2e35, metalness: 0.8, roughness: 0.35 }),
+      glass: new THREE.MeshPhysicalMaterial({ color: 0x0a1a30, metalness: 0.2, roughness: 0.05, clearcoat: 1, clearcoatRoughness: 0.05, emissive: 0x0c2a48, emissiveIntensity: 0.6 }),
+      nozzle: new THREE.MeshBasicMaterial({ color: 0x9fd8ff }),
+    });
+  }
+  const m = shipSkins.get(key);
   const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(3, 2, 10), new THREE.MeshStandardMaterial({ color: bodyColor }));
-  const wing = new THREE.Mesh(new THREE.BoxGeometry(12, 0.4, 5), new THREE.MeshStandardMaterial({ color: wingColor }));
-  wing.position.z = 1.5;
-  const glow = new THREE.Mesh(new THREE.BoxGeometry(2, 1, 0.3), new THREE.MeshBasicMaterial({ color: 0x66ccff }));
-  glow.position.z = 5.1;
-  g.add(body, wing, glow);
+
+  // fuselage: lathe profile, flattened, nose toward -z
+  const prof = [[0, -5.2], [0.35, -4.8], [0.85, -3.6], [1.2, -1.5], [1.35, 0.8], [1.3, 3.2], [1.05, 4.6], [0.8, 5]].map(([r, y]) => new THREE.Vector2(r, y));
+  const fus = new THREE.LatheGeometry(prof, 24).rotateX(Math.PI / 2).scale(1.15, 0.72, 1);
+  g.add(new THREE.Mesh(fus, m.hull));
+
+  // swept wings: planform extruded with a bevel
+  const wingShape = new THREE.Shape();
+  wingShape.moveTo(0.9, -1.8); wingShape.lineTo(5.6, 2.2); wingShape.lineTo(6, 3.4); wingShape.lineTo(5.2, 3.6); wingShape.lineTo(0.9, 3.4);
+  const wingGeo = new THREE.ExtrudeGeometry(wingShape, { depth: 0.18, bevelEnabled: true, bevelThickness: 0.08, bevelSize: 0.08, bevelSegments: 2 }).rotateX(Math.PI / 2);
+  wingGeo.translate(0, 0.05, 0);
+  // planar UVs from the top view so stripes run along the wing
+  const pos = wingGeo.attributes.position, uv = wingGeo.attributes.uv;
+  for (let i = 0; i < pos.count; i++) uv.setXY(i, pos.getX(i) / 7 + 0.1, pos.getZ(i) / 7 + 0.3);
+  // mirrored wing gets mirrored UVs so its lettering still reads correctly
+  const wingGeoM = wingGeo.clone();
+  for (let i = 0; i < wingGeoM.attributes.uv.count; i++) wingGeoM.attributes.uv.setX(i, -wingGeoM.attributes.uv.getX(i));
+  for (const side of [1, -1]) {
+    const w = new THREE.Mesh(side > 0 ? wingGeo : wingGeoM, m.hull);
+    w.scale.x = side; w.position.y = -0.2;
+    g.add(w);
+  }
+  // canopy
+  const canopy = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), m.glass);
+  canopy.scale.set(0.62, 0.45, 1.7); canopy.position.set(0, 0.6, -2.2);
+  g.add(canopy);
+  // engine nacelles with glowing nozzles
+  g.userData.glows = [];
+  for (const side of [1, -1]) {
+    const nac = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 3.4, 16).rotateX(Math.PI / 2), m.dark);
+    nac.position.set(side * 1.75, -0.15, 3.2); g.add(nac);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.09, 8, 20), m.dark);
+    ring.position.set(side * 1.75, -0.15, 4.9); g.add(ring);
+    const noz = new THREE.Mesh(new THREE.CircleGeometry(0.42, 20), m.nozzle);
+    noz.position.set(side * 1.75, -0.15, 4.92); g.add(noz);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+    glow.position.set(side * 1.75, -0.15, 5.6); g.add(glow);
+    g.userData.glows.push(glow);
+  }
+  // twin tail fins
+  const finShape = new THREE.Shape();
+  finShape.moveTo(0, 0); finShape.lineTo(2.2, 0); finShape.lineTo(2.6, 1.6); finShape.lineTo(1.8, 1.6);
+  const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: 0.12, bevelEnabled: false }).rotateY(-Math.PI / 2);
+  for (const side of [1, -1]) {
+    const fin = new THREE.Mesh(finGeo, m.hull);
+    fin.position.set(side * 0.7, 0.5, 2.4); fin.rotation.z = -side * 0.25;
+    g.add(fin);
+  }
+  // wingtip navigation lights: red port, green starboard, blinking white tail
+  const lamp = (color, x, y, z) => { const l = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), new THREE.MeshBasicMaterial({ color })); l.position.set(x, y, z); g.add(l); return l; };
+  lamp(0xff3030, -5.9, -0.1, 3.3); lamp(0x30ff60, 5.9, -0.1, 3.3);
+  g.userData.strobe = lamp(0xffffff, 0, 0.8, 4.6);
+  g.userData.thrust = 0.3;
   return g;
+}
+function animateShipMesh(mesh, t) {
+  const th = mesh.userData.thrust ?? 0.3;
+  for (const s of mesh.userData.glows ?? []) {
+    const flick = 0.9 + Math.random() * 0.2;
+    s.scale.setScalar((1.2 + th * 2.2) * flick);
+    s.material.opacity = 0.35 + th * 0.65;
+  }
+  if (mesh.userData.strobe) mesh.userData.strobe.visible = (t % 1.2) < 0.08;
 }
 function makeShip(kind, pos, colors, hull, shield) {
   const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z).setCcdEnabled(true));
@@ -455,7 +584,7 @@ function spawnWave() {
     const dir = new THREE.Vector3().randomDirection();
     dir.z = -Math.abs(dir.z) - 0.5;
     const pos = posOf(player).add(dir.normalize().multiplyScalar(700 + Math.random() * 400));
-    enemies.push(makeShip('enemy', pos, [0x803030, 0x402020], 40, 30));
+    enemies.push(makeShip('enemy', pos, [0x5a2a2a, 0xffb020, 'X'], 40, 30));
   }
   missileCount = Math.min(missileCount + 2, 6);
   msg.textContent = `${wave}번째 무리 ${n}척`;
@@ -467,7 +596,7 @@ function reset() {
   for (const ms of missiles) scene.remove(ms.m);
   missiles.length = 0;
   enemies = []; kills = 0; wave = 0; missileCount = 2; msg.textContent = '';
-  player = makeShip('player', new THREE.Vector3(0, 0, 0), [0xe8d8a0, 0xc87040], 100, 60);
+  player = makeShip('player', new THREE.Vector3(0, 0, 0), [0xd8dce2, 0xc8502a, 'OO-01'], 100, 60);
   spawnWave();
 }
 reset();
@@ -482,6 +611,7 @@ function step() {
     const v = velOf(player).add(new THREE.Vector3(lx, ly, lin).applyQuaternion(q).multiplyScalar(DT));
     if (assist && !lin && !lx && !ly) v.multiplyScalar(Math.exp(-ASSIST_DAMP * DT));
     player.body.setLinvel(v, true);
+    player.mesh.userData.thrust = Math.max(0, -lin / THRUST) * 0.8 + (lx || ly ? 0.2 : 0) + 0.15;
     if (engineGain) engineGain.gain.setTargetAtTime(muted ? 0 : (Math.abs(lin) / THRUST * 0.25 + (lx || ly ? 0.08 : 0)), ac.currentTime, 0.1);
 
     const pitch = k('ArrowUp') - k('ArrowDown');
@@ -598,10 +728,19 @@ function frame(now) {
     if (!s.alive) continue;
     const p = s.body.translation(), r = s.body.rotation();
     s.mesh.position.set(p.x, p.y, p.z); s.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+    animateShipMesh(s.mesh, now / 1000);
   }
   if (player.alive) { camAnchor.pos.copy(player.mesh.position); camAnchor.quat.copy(player.mesh.quaternion); }
-  camera.position.copy(new THREE.Vector3(0, 4, 20).applyQuaternion(camAnchor.quat).add(camAnchor.pos));
-  camera.quaternion.copy(camAnchor.quat);
+  if (keys.has('KeyC')) {
+    // hold C: slow orbit around the ship to look at it
+    const a = now / 4000, off = new THREE.Vector3(Math.sin(a) * 16, 5, Math.cos(a) * 16).applyQuaternion(camAnchor.quat);
+    camera.position.copy(camAnchor.pos).add(off);
+    camera.up.copy(_y).applyQuaternion(camAnchor.quat);
+    camera.lookAt(camAnchor.pos);
+  } else {
+    camera.position.copy(new THREE.Vector3(0, 4, 20).applyQuaternion(camAnchor.quat).add(camAnchor.pos));
+    camera.quaternion.copy(camAnchor.quat);
+  }
 
   for (const b of beams) { b.t -= dt; if (b.t <= 0) { scene.remove(b.l); b.l.geometry.dispose(); } }
   for (let i = beams.length - 1; i >= 0; i--) if (beams[i].t <= 0) beams.splice(i, 1);
