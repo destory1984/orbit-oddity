@@ -6,6 +6,8 @@
 
 `index.html` 을 브라우저로 연다. three.js 0.160.0 과 Rapier 0.12.0 을 jsDelivr에서 불러오므로 인터넷 연결이 필요하다.
 
+글꼴은 Space Oddity와 같은 Pretendard를 `fonts/` 에 실어 두었다. 크롬은 파일을 바로 열면(file://) 글꼴 파일을 막아 맑은 고딕으로 보인다. 제 글꼴로 보려면 이 폴더에서 `python -m http.server 8765` 를 띄우고 http://127.0.0.1:8765/combat.html 로 연다. 출처는 THIRD-PARTY.md 에 적었다.
+
 ## 조작
 
 - W/S 앞뒤 추력, A/D 좌우, R/F 위아래
