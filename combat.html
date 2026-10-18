@@ -25,9 +25,9 @@
 <div id="help">
 W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 방향키·마우스 방향 · Q/E 롤<br>
-스페이스·왼쪽 버튼 레이저 · G 미사일<br>
-Z 보조 비행 · T 처음부터<br>
-(커서가 안 잠기는 창: 버튼을 누른 채 커서 쪽으로 돈다)
+스페이스 레이저 · G·오른쪽 버튼 미사일<br>
+Z 보조 비행 · M 소리 끄기 · T 처음부터<br>
+(커서가 안 잠기는 창: 왼쪽 버튼을 누른 채 커서 쪽으로 돈다)
 </div>
 <div id="cross"></div>
 <canvas id="radar" width="320" height="140"></canvas>
@@ -141,12 +141,60 @@ function damage(s, amount) {
   const absorbed = Math.min(s.shield, amount);
   s.shield -= absorbed;
   s.hull -= amount - absorbed;
+  if (s.kind === 'player') absorbed >= amount ? sfx.shieldHit() : sfx.hullHit();
   if (s.hull <= 0 && s.alive) {
     explode(posOf(s), s.kind === 'player' ? 0x88ccff : 0xffaa44);
     if (s.kind === 'enemy') { kills++; removeShip(s); }
     else { removeShip(s); msg.innerHTML = `격추당했습니다<br><small style="font-size:16px">격추 ${kills} · T 를 누르면 다시</small>`; }
   }
 }
+
+// ---- sound: synthesized with Web Audio, no sound files ----
+let ac = null, master = null, engineGain = null, muted = false;
+function startAudio() {
+  if (!ac) {
+    ac = new AudioContext();
+    master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
+    // engine hum: low sawtooth through a lowpass, volume follows thrust
+    const osc = ac.createOscillator(); osc.type = 'sawtooth'; osc.frequency.value = 55;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180;
+    engineGain = ac.createGain(); engineGain.gain.value = 0;
+    osc.connect(lp).connect(engineGain).connect(master); osc.start();
+  }
+  if (ac.state === 'suspended') ac.resume();
+}
+addEventListener('keydown', startAudio);
+addEventListener('mousedown', startAudio);
+function tone(type, f0, f1, dur, vol) {
+  if (!ac || muted) return;
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(master); o.start(t); o.stop(t + dur);
+}
+let noiseBuf = null;
+function noise(dur, vol, fromHz, toHz) {
+  if (!ac || muted) return;
+  if (!noiseBuf) {
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  const t = ac.currentTime, src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  src.buffer = noiseBuf; f.type = 'lowpass';
+  f.frequency.setValueAtTime(fromHz, t); f.frequency.exponentialRampToValueAtTime(toHz, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f).connect(g).connect(master); src.start(t); src.stop(t + dur);
+}
+// louder when closer to the player
+const nearVol = at => player?.alive ? Math.max(0.05, 1 - at.distanceTo(posOf(player)) / 1500) : 0.3;
+const sfx = {
+  laser: () => tone('square', 1400, 180, 0.12, 0.12),
+  enemyLaser: at => tone('sawtooth', 700, 120, 0.15, 0.1 * nearVol(at)),
+  missile: () => { noise(0.8, 0.35, 3000, 300); tone('sine', 200, 900, 0.4, 0.1); },
+  explosion: at => { const v = nearVol(at); noise(1.4, 0.9 * v, 1200, 40); tone('sine', 80, 30, 0.8, 0.5 * v); },
+  shieldHit: () => noise(0.12, 0.3, 6000, 1500),
+  hullHit: () => { tone('square', 110, 40, 0.25, 0.25); noise(0.2, 0.3, 800, 100); },
+};
 
 // ---- effects ----
 const beams = [], blasts = [];
@@ -156,6 +204,7 @@ function beam(from, to, color) {
   scene.add(l); beams.push({ l, t: 0.08 });
 }
 function explode(at, color) {
+  sfx.explosion(at);
   const n = 120, pos = new Float32Array(n * 3), vel = [];
   for (let i = 0; i < n; i++) { pos.set([at.x, at.y, at.z], i * 3); vel.push(new THREE.Vector3().randomDirection().multiplyScalar(10 + Math.random() * 40)); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -173,6 +222,7 @@ function fireLaser(shooter, spread, dmg, color) {
   const hit = world.castRay(new RAPIER.Ray(from, dir), LASER_RANGE, true, undefined, undefined, undefined, shooter.body);
   const dist = hit ? (hit.toi ?? hit.timeOfImpact) : LASER_RANGE;
   beam(from, from.clone().add(dir.clone().multiplyScalar(dist)), color);
+  shooter.kind === 'player' ? sfx.laser() : sfx.enemyLaser(from);
   if (hit) {
     const target = owners.get(hit.collider.handle);
     if (target && target.kind !== 'station' && target.alive) damage(target, dmg);
@@ -192,6 +242,7 @@ function fireMissile() {
     if (d > bestDot) { bestDot = d; best = e; }
   }
   missileCount--;
+  sfx.missile();
   const m = new THREE.Mesh(missileGeo, missileMat);
   m.position.copy(p.add(fwd.clone().multiplyScalar(8)));
   scene.add(m);
@@ -253,6 +304,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyZ') assist = !assist;
   if (e.code === 'KeyT') reset();
   if (e.code === 'KeyG') fireMissile();
+  if (e.code === 'KeyM') muted = !muted;
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => keys.delete(e.code));
@@ -317,6 +369,7 @@ function step() {
     const v = velOf(player).add(new THREE.Vector3(lx, ly, lin).applyQuaternion(q).multiplyScalar(DT));
     if (assist && !lin && !lx && !ly) v.multiplyScalar(Math.exp(-ASSIST_DAMP * DT));
     player.body.setLinvel(v, true);
+    if (engineGain) engineGain.gain.setTargetAtTime(muted ? 0 : (Math.abs(lin) / THRUST * 0.25 + (lx || ly ? 0.08 : 0)), ac.currentTime, 0.1);
 
     const [cx, cy] = cursorSteer();
     const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS - cy;
@@ -329,7 +382,7 @@ function step() {
     player.body.setAngvel({ x: (w.x + add.x) * f, y: (w.y + add.y) * f, z: (w.z + add.z) * f }, true);
 
     laserCd -= DT;
-    if ((k('Space') || mouseHeld) && laserCd <= 0) { laserCd = LASER_COOLDOWN; fireLaser(player, 0, LASER_DMG, 0x66ff88); }
+    if (k('Space') && laserCd <= 0) { laserCd = LASER_COOLDOWN; fireLaser(player, 0, LASER_DMG, 0x66ff88); }
   }
 
   for (const s of [player, ...enemies]) {
