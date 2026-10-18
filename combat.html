@@ -26,6 +26,11 @@
   body.touch #touchUi { display: flex; }
   body.touch #help { display: none; }
   canvas { touch-action: none; }
+  #bPause { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); width: 44px; height: 44px; border-radius: 50%; border: 1px solid #4a6a8a; background: rgba(20,40,60,.7); cursor: pointer; padding: 0; touch-action: none; }
+  #bPause::before, #bPause::after { content: ''; position: absolute; top: 13px; width: 5px; height: 18px; background: #cfe; border-radius: 1px; }
+  #bPause::before { left: 15px; } #bPause::after { right: 15px; }
+  #bPause.paused::before { left: 16px; width: 0; height: 0; background: none; border-left: 15px solid #6f8; border-top: 9px solid transparent; border-bottom: 9px solid transparent; border-radius: 0; }
+  #bPause.paused::after { display: none; }
   @media (max-width: 700px) {
     #help { display: none; }
     #hud { font-size: 11px; padding: 6px 8px; min-width: 0; }
@@ -44,8 +49,9 @@ W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
 스페이스 레이저 · G·오른쪽 버튼 미사일<br>
 V 마우스 방식 바꾸기(커서 따라가기 ↔ 움직인 만큼)<br>
 C 누르고 있기: 내 배 둘러보기<br>
-Z 보조 비행 · M 소리 끄기 · T 처음부터
+P·Esc 멈춤 · Z 보조 비행 · M 소리 끄기 · T 처음부터
 </div>
+<button id="bPause" title="멈춤 (P)" aria-label="멈춤"></button>
 <div id="nose"></div>
 <div id="dead"></div>
 <div id="cross"></div>
@@ -230,6 +236,39 @@ const nozzleTex = canvasTex(256, (c, N) => {
   c.fillStyle = '#1a2230'; c.beginPath(); c.arc(h, h, 22, 0, 7); c.fill();
   c.strokeStyle = 'rgba(0,0,0,.8)'; c.lineWidth = 10; c.beginPath(); c.arc(h, h, h - 5, 0, 7); c.stroke();
 });
+// flame fade: opaque at the nozzle (bottom of the canvas = cone base), clear at the tip
+const flameAlpha = (() => {
+  const cv = document.createElement('canvas'); cv.width = 4; cv.height = 128;
+  const c = cv.getContext('2d'), g = c.createLinearGradient(0, 0, 0, 128);
+  g.addColorStop(0, '#000'); g.addColorStop(0.55, '#555'); g.addColorStop(1, '#fff');
+  c.fillStyle = g; c.fillRect(0, 0, 4, 128);
+  return new THREE.CanvasTexture(cv);
+})();
+const puffTex = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+  const c = cv.getContext('2d'), g = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,.95)'); g.addColorStop(0.4, 'rgba(220,235,255,.5)'); g.addColorStop(1, 'rgba(200,220,255,0)');
+  c.fillStyle = g; c.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(cv);
+})();
+// unit cone, base at z=0, tip at z=1, so scale.z is the flame length
+const flameGeo = new THREE.ConeGeometry(1, 1, 20, 1, true).translate(0, 0.5, 0).rotateX(Math.PI / 2);
+const flameMat = (color, opacity) => new THREE.MeshBasicMaterial({ color, alphaMap: flameAlpha, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+// RCS thrusters: [name, position, gas direction] in the ship frame
+const RCS = [
+  ['left', [-1.45, 0, -2.6], [-1, 0, 0]], ['left', [-1.45, 0, 2.6], [-1, 0, 0]],
+  ['right', [1.45, 0, -2.6], [1, 0, 0]], ['right', [1.45, 0, 2.6], [1, 0, 0]],
+  ['bottom', [0, -0.85, -2.6], [0, -1, 0]], ['bottom', [0, -0.85, 2.6], [0, -1, 0]],
+  ['top', [0, 0.9, -1], [0, 1, 0]], ['top', [0, 0.9, 3.2], [0, 1, 0]],
+  ['nose', [0.5, 0, -4.4], [0, 0, -1]], ['nose', [-0.5, 0, -4.4], [0, 0, -1]],
+  // rotation pairs: front and rear on opposite sides
+  ['yawL', [1.3, 0, -3.4], [1, 0, 0]], ['yawL', [-1.4, 0, 4.2], [-1, 0, 0]],
+  ['yawR', [-1.3, 0, -3.4], [-1, 0, 0]], ['yawR', [1.4, 0, 4.2], [1, 0, 0]],
+  ['pitchU', [0, -0.7, -3.4], [0, -1, 0]], ['pitchU', [0, 0.8, 4.2], [0, 1, 0]],
+  ['pitchD', [0, 0.7, -3.4], [0, 1, 0]], ['pitchD', [0, -0.8, 4.2], [0, -1, 0]],
+  ['rollL', [5.8, -0.3, 3.2], [0, -1, 0]], ['rollL', [-5.8, 0.2, 3.2], [0, 1, 0]],
+  ['rollR', [5.8, 0.2, 3.2], [0, 1, 0]], ['rollR', [-5.8, -0.3, 3.2], [0, -1, 0]],
+];
 const shipSkins = new Map();
 // Ship faces -z, about 12 m wingspan and 10 m long, to match the 6x1x5 half-extent collider.
 function makeShipMesh(base, accent, label) {
@@ -293,6 +332,12 @@ function makeShipMesh(base, accent, label) {
     const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
     glow.position.set(side * 1.75, -0.15, 5.6); g.add(glow);
     g.userData.glows.push(glow);
+    // exhaust plume: blue outer sheath and white-hot core
+    for (const [color, op, r] of [[0x3a7cff, 0.55, 0.42], [0xdff2ff, 0.8, 0.2]]) {
+      const f = new THREE.Mesh(flameGeo, flameMat(color, op));
+      f.position.set(side * 1.75, -0.15, 5.0); f.scale.set(r, r, 1); f.userData.r = r; f.userData.op = op;
+      g.add(f); (g.userData.flames ??= []).push(f);
+    }
   }
   // twin tail fins
   const finShape = new THREE.Shape();
@@ -308,10 +353,33 @@ function makeShipMesh(base, accent, label) {
   lamp(0xff3030, -5.9, -0.1, 3.3); lamp(0x30ff60, 5.9, -0.1, 3.3);
   g.userData.strobe = lamp(0xffffff, 0, 0.8, 4.6);
   g.userData.thrust = 0.3;
+  g.userData.rcs = {};
+  g.userData.rcsOn = {};
+  for (const [name, p, d] of RCS) {
+    const dir = new THREE.Vector3(...d);
+    for (const [dist, size] of [[0.35, 0.5], [0.9, 0.9]]) {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTex, transparent: true, depthWrite: false }));
+      sp.position.set(...p).addScaledVector(dir, dist); sp.userData.size = size; sp.visible = false;
+      g.add(sp); (g.userData.rcs[name] ??= []).push(sp);
+    }
+  }
   return g;
 }
 function animateShipMesh(mesh, t) {
   const th = mesh.userData.thrust ?? 0.3;
+  for (const f of mesh.userData.flames ?? []) {
+    const flick = 0.85 + Math.random() * 0.3;
+    f.scale.z = (0.6 + th * 7) * flick * (f.userData.r < 0.3 ? 0.7 : 1);
+    f.scale.x = f.scale.y = f.userData.r * (0.8 + th * 0.4);
+    f.material.opacity = f.userData.op * Math.min(1, 0.4 + th);
+  }
+  for (const [name, sprites] of Object.entries(mesh.userData.rcs ?? {})) {
+    const on = mesh.userData.rcsOn[name] ?? 0;
+    for (const sp of sprites) {
+      sp.visible = on > 0.05;
+      if (sp.visible) { sp.scale.setScalar(sp.userData.size * (0.7 + Math.random() * 0.5) * Math.min(1, on)); sp.material.opacity = Math.min(1, on); }
+    }
+  }
   for (const s of mesh.userData.glows ?? []) {
     const flick = 0.9 + Math.random() * 0.2;
     s.scale.setScalar((1.2 + th * 2.2) * flick);
@@ -363,7 +431,7 @@ function startAudio() {
     engineGain = ac.createGain(); engineGain.gain.value = 0;
     osc.connect(lp).connect(engineGain).connect(master); osc.start();
   }
-  if (ac.state === 'suspended') ac.resume();
+  if (ac.state === 'suspended' && !paused) ac.resume();
 }
 addEventListener('keydown', startAudio);
 addEventListener('mousedown', startAudio);
@@ -525,6 +593,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyT') reset();
   if (e.code === 'KeyG') fireMissile();
   if (e.code === 'KeyM') muted = !muted;
+  if (e.code === 'KeyP' || (e.code === 'Escape' && !locked())) setPaused(!paused);
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => keys.delete(e.code));
@@ -560,7 +629,7 @@ addEventListener('pointermove', e => {
 const recenter = () => { if (mouseMode === 'cursor' && !usedTouch) aimX = aimY = 0; };
 document.documentElement.addEventListener('mouseleave', recenter);
 addEventListener('mouseout', e => { if (!e.relatedTarget) recenter(); });
-addEventListener('blur', () => { recenter(); keys.clear(); });
+addEventListener('blur', () => { recenter(); keys.clear(); setPaused(true); });
 
 // touch: left half is a thrust stick, right half drags the aim point (springs back on release)
 let stickX = 0, stickY = 0;
@@ -613,6 +682,7 @@ async function toggleGyro() {
 }
 const tap = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.stopPropagation(); startAudio(); fn(); });
 tap('bMissile', () => fireMissile());
+tap('bPause', () => setPaused(!paused));
 tap('bReset', () => reset());
 tap('bGyro', toggleGyro);
 tap('bSound', () => { muted = !muted; document.getElementById('bSound').classList.toggle('on', !muted); });
@@ -668,6 +738,13 @@ function step() {
     player.mesh.userData.thrust = Math.max(0, -lin / THRUST) * 0.8 + (lx || ly ? 0.2 : 0) + 0.15;
     if (engineGain) engineGain.gain.setTargetAtTime(muted ? 0 : (Math.abs(lin) / THRUST * 0.25 + (lx || ly ? 0.08 : 0)), ac.currentTime, 0.1);
 
+    // RCS: gas leaves on the side opposite to the push
+    const sx = Math.sign(lx), sy = Math.sign(ly);
+    const rcsOn = player.mesh.userData.rcsOn;
+    rcsOn.left = sx > 0 ? 1 : 0; rcsOn.right = sx < 0 ? 1 : 0;
+    rcsOn.bottom = sy > 0 ? 1 : 0; rcsOn.top = sy < 0 ? 1 : 0;
+    rcsOn.nose = lin > 0 ? 1 : 0;
+
     const pitch = k('ArrowUp') - k('ArrowDown');
     const yaw = k('ArrowLeft') - k('ArrowRight');
     const roll = k('KeyQ') - k('KeyE');
@@ -682,6 +759,13 @@ function step() {
     if (ax || ay) { wl.x += (-ay * AIM_RATE - wl.x) * blend; wl.y += (-ax * AIM_RATE - wl.y) * blend; }
     else { if (!pitch) wl.x *= damp; if (!yaw) wl.y *= damp; }
     if (!roll) wl.z *= damp;
+    // rotation jets fire while the turn rate is changing
+    const before = new THREE.Vector3(w.x, w.y, w.z).applyQuaternion(qi);
+    const acc = wl.clone().sub(before).divideScalar(DT);
+    const jet = v => Math.max(0, Math.min(1, (v - 0.15) * 2));
+    rcsOn.yawL = jet(acc.y); rcsOn.yawR = jet(-acc.y);
+    rcsOn.pitchU = jet(acc.x); rcsOn.pitchD = jet(-acc.x);
+    rcsOn.rollL = jet(acc.z); rcsOn.rollR = jet(-acc.z);
     player.body.setAngvel(wl.applyQuaternion(q), true);
     if (relDX || relDY) {
       // relative mouse: rotate exactly as far as the mouse moved
@@ -769,12 +853,24 @@ function drawOverlay() {
   for (; i < ws; i++) tgtDivs[i].style.display = 'none';
 }
 
+// ---- pause ----
+var paused = false;
+function setPaused(v) {
+  if (v === paused || (v && player && !player.alive)) return;
+  paused = v;
+  document.getElementById('bPause').classList.toggle('paused', paused);
+  if (paused) { msg.dataset.prev = msg.innerHTML; msg.innerHTML = '<div>멈춤<br><small style="font-size:16px">P 또는 ▶ 를 누르면 이어서</small></div>'; }
+  else msg.innerHTML = msg.dataset.prev ?? '';
+  if (ac) paused ? ac.suspend() : ac.resume();
+}
+
 // ---- loop ----
 let acc = 0, last = performance.now();
 const camAnchor = { pos: new THREE.Vector3(), quat: new THREE.Quaternion() };
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
   acc += dt;
+  if (paused) acc = 0;
   while (acc >= DT) { step(); acc -= DT; }
 
   stationGroup.quaternion.setFromAxisAngle(_z, stationAngle);
