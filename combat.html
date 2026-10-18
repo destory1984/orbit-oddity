@@ -15,7 +15,22 @@
   #radar { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); pointer-events: none; }
   .tgt { position: fixed; width: 28px; height: 28px; margin: -14px; border: 1px solid #f86; pointer-events: none; font: 10px ui-monospace, monospace; color: #f86; }
   .tgt span { position: absolute; top: 30px; left: 0; white-space: nowrap; }
-  @media (max-width: 700px) { #help { display: none; } }
+  #nose { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px; background: rgba(100,255,140,.6); border-radius: 50%; pointer-events: none; }
+  #stick { position: fixed; display: none; width: 120px; height: 120px; margin: -60px; border: 2px solid rgba(150,220,255,.35); border-radius: 50%; pointer-events: none; }
+  #knob { position: absolute; left: 40px; top: 40px; width: 40px; height: 40px; border-radius: 50%; background: rgba(150,220,255,.4); }
+  #touchUi { display: none; position: fixed; right: 12px; bottom: 12px; flex-direction: column; gap: 10px; align-items: flex-end; }
+  #touchUi button { font: 14px system-ui, sans-serif; color: #cfe; background: rgba(20,40,60,.7); border: 1px solid #4a6a8a; border-radius: 28px; padding: 12px 16px; touch-action: none; }
+  #touchUi button.big { width: 76px; height: 76px; border-radius: 50%; padding: 0; font-size: 15px; border-color: #ffee88; }
+  #touchUi button.on { border-color: #6f8; color: #6f8; }
+  body.touch #touchUi { display: flex; }
+  body.touch #help { display: none; }
+  canvas { touch-action: none; }
+  @media (max-width: 700px) {
+    #help { display: none; }
+    #hud { font-size: 11px; padding: 6px 8px; min-width: 0; }
+    .bar { width: 70px; }
+    #radar { width: 200px; height: 88px; }
+  }
   #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
 </style>
 </head>
@@ -24,12 +39,21 @@
 <div id="hud"></div>
 <div id="help">
 W/S 앞뒤 추력 · A/D 좌우 · R/F 위아래<br>
-방향키·마우스 방향 · Q/E 롤<br>
+마우스: 커서 쪽으로 배가 돈다 · 방향키도 된다 · Q/E 롤<br>
 스페이스 레이저 · G·오른쪽 버튼 미사일<br>
-Z 보조 비행 · M 소리 끄기 · T 처음부터<br>
-(커서가 안 잠기는 창: 왼쪽 버튼을 누른 채 커서 쪽으로 돈다)
+V 마우스 방식 바꾸기(커서 따라가기 ↔ 움직인 만큼)<br>
+Z 보조 비행 · M 소리 끄기 · T 처음부터
 </div>
+<div id="nose"></div>
 <div id="cross"></div>
+<div id="stick"><div id="knob"></div></div>
+<div id="touchUi">
+  <button id="bSound" class="on">소리</button>
+  <button id="bGyro">기울이기</button>
+  <button id="bReset">다시</button>
+  <button id="bMissile" class="big">미사일</button>
+</div>
+<script>if (matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0) document.body.classList.add('touch');</script>
 <canvas id="radar" width="320" height="140"></canvas>
 <div id="msg"></div>
 
@@ -216,9 +240,9 @@ function explode(at, color) {
 // ---- weapons ----
 function fireLaser(shooter, spread, dmg, color) {
   const q = quatOf(shooter);
-  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  const dir = shooter.kind === 'player' ? aimDir() : new THREE.Vector3(0, 0, -1).applyQuaternion(q);
   if (spread) dir.add(new THREE.Vector3().randomDirection().multiplyScalar(spread)).normalize();
-  const from = posOf(shooter).add(dir.clone().multiplyScalar(6));
+  const from = posOf(shooter).add(new THREE.Vector3(0, 0, -6).applyQuaternion(q));
   if (shooter.kind === 'player') { const t = assistTarget(); if (t) dir.copy(posOf(t).sub(from).normalize()); }
   const hit = world.castRay(new RAPIER.Ray(from, dir), LASER_RANGE, true, undefined, undefined, undefined, shooter.body);
   const dist = hit ? (hit.toi ?? hit.timeOfImpact) : LASER_RANGE;
@@ -229,11 +253,12 @@ function fireLaser(shooter, spread, dmg, color) {
     if (target && target.kind !== 'station' && target.alive) damage(target, dmg);
   }
 }
-// aim assist: the player's laser bends toward the enemy nearest the crosshair inside this cone
+// aim assist: the player's laser bends toward the enemy nearest the aim point inside this cone
 const AIM_CONE = 0.07; // rad, about 4 degrees
+const AIM_RATE = 1.4;  // rad/s turn rate with the aim point at the screen edge
 function assistTarget() {
   if (!player?.alive) return null;
-  const p = posOf(player), fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(quatOf(player));
+  const p = posOf(player), fwd = aimDir();
   let best = null, bestAng = AIM_CONE;
   for (const e of enemies) {
     if (!e.alive) continue;
@@ -326,25 +351,97 @@ addEventListener('keydown', e => {
 addEventListener('keyup', e => keys.delete(e.code));
 const k = c => keys.has(c) ? 1 : 0;
 
-let mouseDX = 0, mouseDY = 0, cursorX = 0, cursorY = 0, mouseHeld = false;
-const MOUSE_SENS = 0.04;
+// Aim point in screen space (-1..1, y down). The ship turns toward it, Freelancer style,
+// and the laser is gimballed toward it. Desktop mouse, touch drag and phone tilt all feed it.
+let aimX = 0, aimY = 0;
+let mouseMode = 'cursor'; // 'cursor' (Freelancer) or 'relative' (pointer lock, ship turns exactly as far as the mouse moves)
+let relDX = 0, relDY = 0;
+const REL_SENS = 0.0025; // rad per pixel
+const locked = () => document.pointerLockElement === renderer.domElement;
+addEventListener('keydown', e => {
+  if (e.code !== 'KeyV') return;
+  mouseMode = mouseMode === 'cursor' ? 'relative' : 'cursor';
+  if (mouseMode === 'relative') Promise.resolve(renderer.domElement.requestPointerLock?.()).catch(() => { mouseMode = 'cursor'; });
+  else document.exitPointerLock?.();
+  aimX = aimY = 0;
+});
+document.addEventListener('pointerlockchange', () => { if (!locked() && mouseMode === 'relative') mouseMode = 'cursor'; });
 renderer.domElement.addEventListener('mousedown', e => {
-  if (document.pointerLockElement !== renderer.domElement)
-    Promise.resolve(renderer.domElement.requestPointerLock?.()).catch(() => {});
-  if (e.button === 0) mouseHeld = true;
+  if (mouseMode === 'relative' && !locked()) Promise.resolve(renderer.domElement.requestPointerLock?.()).catch(() => {});
   if (e.button === 2) fireMissile();
 });
-addEventListener('mouseup', e => { if (e.button === 0) mouseHeld = false; });
 addEventListener('contextmenu', e => e.preventDefault());
-addEventListener('mousemove', e => {
-  cursorX = e.clientX / innerWidth * 2 - 1; cursorY = e.clientY / innerHeight * 2 - 1;
-  if (document.pointerLockElement !== renderer.domElement) return;
-  mouseDX += e.movementX; mouseDY += e.movementY;
+let usedTouch = false; // auto-fire only for players actually on a touchscreen
+addEventListener('pointermove', e => {
+  if (e.pointerType !== 'mouse') return;
+  if (mouseMode === 'relative') { if (locked()) { relDX += e.movementX; relDY += e.movementY; } return; }
+  aimX = e.clientX / innerWidth * 2 - 1; aimY = e.clientY / innerHeight * 2 - 1;
 });
-function cursorSteer() {
-  if (document.pointerLockElement === renderer.domElement || !mouseHeld) return [0, 0];
-  const dz = v => Math.abs(v) < 0.1 ? 0 : Math.sign(v) * (Math.abs(v) - 0.1) / 0.9;
-  return [dz(cursorX), dz(cursorY)];
+document.addEventListener('mouseleave', () => { if (mouseMode === 'cursor' && !usedTouch) aimX = aimY = 0; });
+
+// touch: left half is a thrust stick, right half drags the aim point (springs back on release)
+let stickX = 0, stickY = 0;
+const touches = new Map();
+const stickEl = document.getElementById('stick'), knobEl = document.getElementById('knob');
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch') return;
+  startAudio(); usedTouch = true;
+  touches.set(e.pointerId, { side: e.clientX < innerWidth / 2 ? 'stick' : 'aim', x0: e.clientX, y0: e.clientY });
+  if (e.clientX < innerWidth / 2) Object.assign(stickEl.style, { display: 'block', left: `${e.clientX}px`, top: `${e.clientY}px` });
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  const t = touches.get(e.pointerId); if (!t) return;
+  const dx = e.clientX - t.x0, dy = e.clientY - t.y0;
+  if (t.side === 'stick') {
+    const r = Math.min(1, Math.hypot(dx, dy) / 60), a = Math.atan2(dy, dx);
+    stickX = Math.cos(a) * r; stickY = Math.sin(a) * r;
+    knobEl.style.transform = `translate(${stickX * 60}px, ${stickY * 60}px)`;
+  } else {
+    aimX = Math.max(-1, Math.min(1, dx / (innerWidth * 0.2)));
+    aimY = Math.max(-1, Math.min(1, dy / (innerHeight * 0.2)));
+  }
+});
+const endTouch = e => {
+  const t = touches.get(e.pointerId); if (!t) return;
+  touches.delete(e.pointerId);
+  if (t.side === 'stick') { stickX = stickY = 0; stickEl.style.display = 'none'; knobEl.style.transform = ''; }
+  else if (!gyroOn) aimX = aimY = 0;
+};
+renderer.domElement.addEventListener('pointerup', endTouch);
+renderer.domElement.addEventListener('pointercancel', endTouch);
+
+// phone tilt (optional): tilt from the pose held when it was switched on
+let gyroOn = false, gyroBase = null;
+addEventListener('deviceorientation', e => {
+  if (!gyroOn || e.beta == null) return;
+  if ([...touches.values()].some(t => t.side === 'aim')) return;
+  const ang = screen.orientation?.angle ?? 0;
+  const [gx, gy] = ang === 90 ? [e.beta, -e.gamma] : ang === 270 ? [-e.beta, e.gamma] : [e.gamma, e.beta];
+  if (!gyroBase) gyroBase = [gx, gy];
+  aimX = Math.max(-1, Math.min(1, (gx - gyroBase[0]) / 20));
+  aimY = Math.max(-1, Math.min(1, (gy - gyroBase[1]) / 20));
+});
+async function toggleGyro() {
+  if (!gyroOn && typeof DeviceOrientationEvent?.requestPermission === 'function') {
+    try { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return; } catch { return; }
+  }
+  gyroOn = !gyroOn; gyroBase = null; aimX = aimY = 0;
+  document.getElementById('bGyro').classList.toggle('on', gyroOn);
+}
+const tap = (id, fn) => document.getElementById(id).addEventListener('pointerdown', e => { e.stopPropagation(); startAudio(); fn(); });
+tap('bMissile', () => fireMissile());
+tap('bReset', () => reset());
+tap('bGyro', toggleGyro);
+tap('bSound', () => { muted = !muted; document.getElementById('bSound').classList.toggle('on', !muted); });
+
+// aim direction in the ship frame, limited to the gun gimbal
+const GIMBAL = 0.35;
+function aimDir() {
+  const tv = Math.tan(camera.fov * Math.PI / 360), th = tv * camera.aspect;
+  const local = new THREE.Vector3(aimX * th, -aimY * tv, -1).normalize();
+  const fwd = new THREE.Vector3(0, 0, -1), a = local.angleTo(fwd);
+  if (a > GIMBAL) local.copy(fwd.clone().lerp(local, GIMBAL / a).normalize());
+  return local.applyQuaternion(quatOf(player));
 }
 
 // ---- game state ----
@@ -381,24 +478,37 @@ function step() {
 
   if (player.alive) {
     const q = quatOf(player);
-    const lin = (k('KeyS') - k('KeyW')) * THRUST, lx = (k('KeyD') - k('KeyA')) * STRAFE, ly = (k('KeyR') - k('KeyF')) * STRAFE;
+    const lin = (k('KeyS') - k('KeyW') + stickY) * THRUST, lx = (k('KeyD') - k('KeyA') + stickX) * STRAFE, ly = (k('KeyR') - k('KeyF')) * STRAFE;
     const v = velOf(player).add(new THREE.Vector3(lx, ly, lin).applyQuaternion(q).multiplyScalar(DT));
     if (assist && !lin && !lx && !ly) v.multiplyScalar(Math.exp(-ASSIST_DAMP * DT));
     player.body.setLinvel(v, true);
     if (engineGain) engineGain.gain.setTargetAtTime(muted ? 0 : (Math.abs(lin) / THRUST * 0.25 + (lx || ly ? 0.08 : 0)), ac.currentTime, 0.1);
 
-    const [cx, cy] = cursorSteer();
-    const pitch = k('ArrowUp') - k('ArrowDown') - mouseDY * MOUSE_SENS - cy;
-    const yaw = k('ArrowLeft') - k('ArrowRight') - mouseDX * MOUSE_SENS - cx;
+    const pitch = k('ArrowUp') - k('ArrowDown');
+    const yaw = k('ArrowLeft') - k('ArrowRight');
     const roll = k('KeyQ') - k('KeyE');
-    mouseDX = 0; mouseDY = 0;
+    // work in the ship frame: keys accelerate, the aim point sets a target turn rate
+    const qi = q.clone().invert();
     const w = player.body.angvel();
-    const add = new THREE.Vector3(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT).applyQuaternion(q);
-    const f = (pitch || yaw || roll) ? 1 : Math.exp(-ANG_DAMP * DT);
-    player.body.setAngvel({ x: (w.x + add.x) * f, y: (w.y + add.y) * f, z: (w.z + add.z) * f }, true);
+    const wl = new THREE.Vector3(w.x, w.y, w.z).applyQuaternion(qi);
+    wl.add(new THREE.Vector3(pitch, yaw, roll).multiplyScalar(ANG_ACC * DT));
+    const dz = v => Math.abs(v) < 0.06 ? 0 : Math.sign(v) * (Math.abs(v) - 0.06) / 0.94;
+    const ax = dz(aimX), ay = dz(aimY);
+    const blend = 1 - Math.exp(-6 * DT), damp = Math.exp(-ANG_DAMP * DT);
+    if (ax || ay) { wl.x += (-ay * AIM_RATE - wl.x) * blend; wl.y += (-ax * AIM_RATE - wl.y) * blend; }
+    else { if (!pitch) wl.x *= damp; if (!yaw) wl.y *= damp; }
+    if (!roll) wl.z *= damp;
+    player.body.setAngvel(wl.applyQuaternion(q), true);
+    if (relDX || relDY) {
+      // relative mouse: rotate exactly as far as the mouse moved
+      const turn = new THREE.Quaternion().setFromEuler(new THREE.Euler(-relDY * REL_SENS, -relDX * REL_SENS, 0, 'YXZ'));
+      player.body.setRotation(q.clone().multiply(turn), true);
+      relDX = relDY = 0;
+    }
 
     laserCd -= DT;
-    if (k('Space') && laserCd <= 0) { laserCd = LASER_COOLDOWN; fireLaser(player, 0, LASER_DMG, 0x66ff88); }
+    const autoFire = usedTouch && assistTarget();
+    if ((k('Space') || autoFire) && laserCd <= 0) { laserCd = LASER_COOLDOWN; fireLaser(player, 0, LASER_DMG, 0x66ff88); }
   }
 
   for (const s of [player, ...enemies]) {
@@ -454,7 +564,12 @@ function drawOverlay() {
   // boxes around enemies on screen, green when the laser will lock on
   const locked = assistTarget();
   const cr = Math.tan(AIM_CONE) / Math.tan(camera.fov * Math.PI / 360) * innerHeight / 2, cross = document.getElementById('cross');
-  Object.assign(cross.style, { width: `${cr * 2}px`, height: `${cr * 2}px`, margin: `-${cr}px`, borderColor: locked ? '#6f8' : 'rgba(100,255,140,.35)' });
+  // ring sits where the guns actually point (aim point, clamped to the gimbal)
+  const ap = posOf(player).addScaledVector(aimDir(), 500).project(camera);
+  Object.assign(cross.style, {
+    width: `${cr * 2}px`, height: `${cr * 2}px`, margin: `-${cr}px`, borderColor: locked ? '#6f8' : 'rgba(100,255,140,.35)',
+    left: `${(ap.x + 1) / 2 * innerWidth}px`, top: `${(1 - ap.y) / 2 * innerHeight}px`,
+  });
   let i = 0;
   for (const e of enemies) {
     const p = posOf(e), sp = p.clone().project(camera);
