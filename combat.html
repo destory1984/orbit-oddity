@@ -421,16 +421,18 @@ function damage(s, amount) {
 }
 
 // ---- sound: synthesized with Web Audio, no sound files ----
-let ac = null, master = null, engineGain = null, muted = false;
+let ac = null, master = null, engineGain = null, engineFilter = null, muted = false;
 function startAudio() {
   if (!ac) {
     ac = new AudioContext();
     master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
-    // engine hum: low sawtooth through a lowpass, volume follows thrust
-    const osc = ac.createOscillator(); osc.type = 'sawtooth'; osc.frequency.value = 55;
-    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180;
+    // main engine: looped noise through a lowpass, a rocket "pshhh" rather than a tone.
+    // Volume and brightness follow thrust, so it swells "pu-shhh" when the throttle opens.
+    ensureNoise();
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    engineFilter = ac.createBiquadFilter(); engineFilter.type = 'lowpass'; engineFilter.frequency.value = 300; engineFilter.Q.value = 0.7;
     engineGain = ac.createGain(); engineGain.gain.value = 0;
-    osc.connect(lp).connect(engineGain).connect(master); osc.start();
+    src.connect(engineFilter).connect(engineGain).connect(master); src.start();
   }
   if (ac.state === 'suspended' && !paused) ac.resume();
 }
@@ -757,7 +759,11 @@ function step() {
     if (assist && !lin && !lx && !ly) v.multiplyScalar(Math.exp(-ASSIST_DAMP * DT));
     player.body.setLinvel(v, true);
     player.mesh.userData.thrust = Math.max(0, -lin / THRUST) * 0.8 + (lx || ly ? 0.2 : 0) + 0.15;
-    if (engineGain) engineGain.gain.setTargetAtTime(muted ? 0 : (Math.abs(lin) / THRUST * 0.25 + (lx || ly ? 0.08 : 0)), ac.currentTime, 0.1);
+    if (engineGain) {
+      const th = Math.min(1, Math.abs(lin) / THRUST);
+      engineGain.gain.setTargetAtTime(muted ? 0 : th * 0.35, ac.currentTime, th ? 0.06 : 0.25);
+      engineFilter.frequency.setTargetAtTime(th ? 2600 : 300, ac.currentTime, th ? 0.12 : 0.3);
+    }
 
     // RCS: gas leaves on the side opposite to the push
     const sx = Math.sign(lx), sy = Math.sign(ly);
