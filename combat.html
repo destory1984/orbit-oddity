@@ -464,6 +464,7 @@ const sfx = {
   missile: () => { noise(0.8, 0.35, 3000, 300); tone('sine', 200, 900, 0.4, 0.1); },
   explosion: at => { const v = nearVol(at); noise(1.4, 0.9 * v, 1200, 40); tone('sine', 80, 30, 0.8, 0.5 * v); },
   shieldHit: () => noise(0.12, 0.3, 6000, 1500),
+  rcs: v => noise(0.07, 0.16 * v, 11000, 3500),
   hullHit: () => { tone('square', 110, 40, 0.25, 0.25); noise(0.2, 0.3, 800, 100); },
 };
 
@@ -699,6 +700,7 @@ function aimDir() {
 }
 
 // ---- game state ----
+let rcsSoundCd = 0;
 let player, enemies = [], kills = 0, wave = 0, missileCount = 0, laserCd = 0, waveDelay = 0;
 const msg = document.getElementById('msg');
 
@@ -767,6 +769,10 @@ function step() {
     rcsOn.yawL = jet(acc.y); rcsOn.yawR = jet(-acc.y);
     rcsOn.pitchU = jet(acc.x); rcsOn.pitchD = jet(-acc.x);
     rcsOn.rollL = jet(acc.z); rcsOn.rollR = jet(-acc.z);
+    // short gas bursts while any thruster fires: "chk-chk"
+    rcsSoundCd -= DT;
+    const rcsMax = Math.max(0, ...Object.values(rcsOn));
+    if (rcsMax > 0.05 && rcsSoundCd <= 0) { sfx.rcs(Math.min(1, rcsMax)); rcsSoundCd = 0.11 + Math.random() * 0.04; }
     player.body.setAngvel(wl.applyQuaternion(q), true);
     if (relDX || relDY) {
       // relative mouse: rotate exactly as far as the mouse moved
