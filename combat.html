@@ -7,22 +7,22 @@
 <link rel="stylesheet" href="fonts/pretendard/pretendardvariable-dynamic-subset.css">
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: "Pretendard Variable", Pretendard, "Segoe UI", "Malgun Gothic", sans-serif; color: #cfe; }
-  #hud { position: fixed; top: 12px; left: 12px; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; background: rgba(0,10,20,.6); padding: 10px 14px; border-radius: 6px; min-width: 220px; }
+  #hud { position: fixed; top: 12px; left: 12px; font-size: 15px; line-height: 1.6; font-variant-numeric: tabular-nums; background: rgba(0,10,20,.6); padding: 10px 14px; border-radius: 6px; min-width: 220px; }
   .bar { display: inline-block; width: 120px; height: 8px; background: #233; vertical-align: middle; }
   .bar i { display: block; height: 100%; }
-  #help { position: fixed; top: 12px; right: 12px; font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; background: rgba(0,10,20,.6); padding: 8px 12px; border-radius: 6px; text-align: right; }
-  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 32px; pointer-events: none; text-shadow: 0 0 8px #000; text-align: center; }
+  #help { position: fixed; top: 12px; right: 12px; font-size: 13px; line-height: 1.5; font-variant-numeric: tabular-nums; background: rgba(0,10,20,.6); padding: 8px 12px; border-radius: 6px; text-align: right; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 33px; pointer-events: none; text-shadow: 0 0 8px #000; text-align: center; }
   #cross { position: fixed; left: 50%; top: 50%; width: 24px; height: 24px; margin: -12px; border: 1px solid #6f8; border-radius: 50%; pointer-events: none; }
   #radar { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); pointer-events: none; }
-  .tgt { position: fixed; width: 28px; height: 28px; margin: -14px; border: 1px solid #f86; pointer-events: none; font-size: 10px; font-variant-numeric: tabular-nums; color: #f86; }
+  .tgt { position: fixed; width: 28px; height: 28px; margin: -14px; border: 1px solid #f86; pointer-events: none; font-size: 11px; font-variant-numeric: tabular-nums; color: #f86; }
   .tgt span { position: absolute; top: 30px; left: 0; white-space: nowrap; }
   #nose { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px; background: rgba(100,255,140,.6); border-radius: 50%; pointer-events: none; }
   #dead { position: fixed; left: 44%; top: 44%; width: 12%; height: 12%; border: 1px dashed rgba(100,255,140,.25); border-radius: 50%; pointer-events: none; }
   #stick { position: fixed; display: none; width: 120px; height: 120px; margin: -60px; border: 2px solid rgba(150,220,255,.35); border-radius: 50%; pointer-events: none; }
   #knob { position: absolute; left: 40px; top: 40px; width: 40px; height: 40px; border-radius: 50%; background: rgba(150,220,255,.4); }
   #touchUi { display: none; position: fixed; right: 12px; bottom: 12px; flex-direction: column; gap: 10px; align-items: flex-end; }
-  #touchUi button { font-size: 14px; font-family: inherit; color: #cfe; background: rgba(20,40,60,.7); border: 1px solid #4a6a8a; border-radius: 28px; padding: 12px 16px; touch-action: none; }
-  #touchUi button.big { width: 76px; height: 76px; border-radius: 50%; padding: 0; font-size: 15px; border-color: #ffee88; }
+  #touchUi button { font-size: 15px; font-family: inherit; color: #cfe; background: rgba(20,40,60,.7); border: 1px solid #4a6a8a; border-radius: 28px; padding: 12px 16px; touch-action: none; }
+  #touchUi button.big { width: 76px; height: 76px; border-radius: 50%; padding: 0; font-size: 16px; border-color: #ffee88; }
   #touchUi button.on { border-color: #6f8; color: #6f8; }
   body.touch #touchUi { display: flex; }
   body.touch #help { display: none; }
@@ -34,7 +34,7 @@
   #bPause.paused::after { display: none; }
   @media (max-width: 700px) {
     #help { display: none; }
-    #hud { font-size: 11px; padding: 6px 8px; min-width: 0; }
+    #hud { font-size: 12px; padding: 6px 8px; min-width: 0; }
     .bar { width: 70px; }
     #radar { width: 200px; height: 88px; }
   }
@@ -416,7 +416,7 @@ function damage(s, amount) {
   if (s.hull <= 0 && s.alive) {
     explode(posOf(s), s.kind === 'player' ? 0x88ccff : 0xffaa44);
     if (s.kind === 'enemy') { kills++; removeShip(s); }
-    else { removeShip(s); msg.innerHTML = `격추당했습니다<br><small style="font-size:16px">격추 ${kills} · T 를 누르면 다시</small>`; }
+    else { removeShip(s); msg.innerHTML = `격추당했습니다<br><small style="font-size:17px">격추 ${kills} · T 를 누르면 다시</small>`; }
   }
 }
 
@@ -860,7 +860,7 @@ function setPaused(v) {
   if (v === paused || (v && player && !player.alive)) return;
   paused = v;
   document.getElementById('bPause').classList.toggle('paused', paused);
-  if (paused) { msg.dataset.prev = msg.innerHTML; msg.innerHTML = '<div>멈춤<br><small style="font-size:16px">P 또는 ▶ 를 누르면 이어서</small></div>'; }
+  if (paused) { msg.dataset.prev = msg.innerHTML; msg.innerHTML = '<div>멈춤<br><small style="font-size:17px">P 또는 ▶ 를 누르면 이어서</small></div>'; }
   else msg.innerHTML = msg.dataset.prev ?? '';
   if (ac) paused ? ac.suspend() : ac.resume();
 }
