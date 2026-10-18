@@ -193,6 +193,43 @@ const glowTex = (() => {
   c.fillStyle = g; c.fillRect(0, 0, 128, 128);
   return new THREE.CanvasTexture(cv);
 })();
+function canvasTex(size, draw) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = size;
+  draw(cv.getContext('2d'), size);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+// rear bulkhead: dark plate, vent grille, hazard ring, two marker lamps
+const tailTex = canvasTex(512, (c, N) => {
+  const h = N / 2;
+  c.fillStyle = '#3a3f47'; c.fillRect(0, 0, N, N);
+  c.save(); c.beginPath(); c.arc(h, h, h - 6, 0, Math.PI * 2); c.clip();
+  for (let a = 0; a < 16; a++) { c.fillStyle = a % 2 ? '#e8c040' : '#222'; c.beginPath(); c.moveTo(h, h); c.arc(h, h, h, a / 16 * Math.PI * 2, (a + 1) / 16 * Math.PI * 2); c.fill(); }
+  c.fillStyle = '#4a505a'; c.beginPath(); c.arc(h, h, h - 34, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = 'rgba(0,0,0,.5)'; c.lineWidth = 3;
+  for (let a = 0; a < 8; a++) { const t = a / 8 * Math.PI * 2; c.beginPath(); c.moveTo(h + Math.cos(t) * 70, h + Math.sin(t) * 70); c.lineTo(h + Math.cos(t) * (h - 36), h + Math.sin(t) * (h - 36)); c.stroke(); }
+  // vent grille
+  c.fillStyle = '#15181c'; c.fillRect(h - 110, h - 46, 220, 92);
+  c.fillStyle = '#5a616c'; for (let y = h - 40; y < h + 44; y += 12) c.fillRect(h - 104, y, 208, 5);
+  // rivets
+  c.fillStyle = 'rgba(0,0,0,.6)';
+  for (let a = 0; a < 40; a++) { const t = a / 40 * Math.PI * 2; c.beginPath(); c.arc(h + Math.cos(t) * (h - 44), h + Math.sin(t) * (h - 44), 3, 0, 7); c.fill(); }
+  // lamps
+  for (const [x, col] of [[h - 150, '#ff4040'], [h + 150, '#40ff70']]) {
+    const g = c.createRadialGradient(x, h + 100, 0, x, h + 100, 22); g.addColorStop(0, '#fff'); g.addColorStop(0.4, col); g.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = g; c.beginPath(); c.arc(x, h + 100, 22, 0, 7); c.fill();
+  }
+  c.restore();
+});
+// engine throat: turbine blades lit from inside
+const nozzleTex = canvasTex(256, (c, N) => {
+  const h = N / 2;
+  const g = c.createRadialGradient(h, h, 0, h, h, h); g.addColorStop(0, '#ffffff'); g.addColorStop(0.25, '#bfe6ff'); g.addColorStop(0.6, '#3a78c8'); g.addColorStop(1, '#0a1020');
+  c.fillStyle = g; c.fillRect(0, 0, N, N);
+  c.strokeStyle = 'rgba(10,20,40,.55)'; c.lineWidth = 5;
+  for (let a = 0; a < 24; a++) { const t = a / 24 * Math.PI * 2; c.beginPath(); c.moveTo(h + Math.cos(t) * 26, h + Math.sin(t) * 26); c.quadraticCurveTo(h + Math.cos(t + 0.3) * 80, h + Math.sin(t + 0.3) * 80, h + Math.cos(t + 0.5) * h, h + Math.sin(t + 0.5) * h); c.stroke(); }
+  c.fillStyle = '#1a2230'; c.beginPath(); c.arc(h, h, 22, 0, 7); c.fill();
+  c.strokeStyle = 'rgba(0,0,0,.8)'; c.lineWidth = 10; c.beginPath(); c.arc(h, h, h - 5, 0, 7); c.stroke();
+});
 const shipSkins = new Map();
 // Ship faces -z, about 12 m wingspan and 10 m long, to match the 6x1x5 half-extent collider.
 function makeShipMesh(base, accent, label) {
@@ -203,16 +240,24 @@ function makeShipMesh(base, accent, label) {
       hull: new THREE.MeshStandardMaterial({ ...tex, metalness: 0.55, roughness: 1, envMapIntensity: 1.2 }),
       dark: new THREE.MeshStandardMaterial({ color: 0x2a2e35, metalness: 0.8, roughness: 0.35 }),
       glass: new THREE.MeshPhysicalMaterial({ color: 0x0a1a30, metalness: 0.2, roughness: 0.05, clearcoat: 1, clearcoatRoughness: 0.05, emissive: 0x0c2a48, emissiveIntensity: 0.6 }),
-      nozzle: new THREE.MeshBasicMaterial({ color: 0x9fd8ff }),
+      nozzle: new THREE.MeshBasicMaterial({ map: nozzleTex }),
+      tail: new THREE.MeshStandardMaterial({ map: tailTex, metalness: 0.6, roughness: 0.5 }),
     });
   }
   const m = shipSkins.get(key);
   const g = new THREE.Group();
 
   // fuselage: lathe profile, flattened, nose toward -z
-  const prof = [[0, -5.2], [0.35, -4.8], [0.85, -3.6], [1.2, -1.5], [1.35, 0.8], [1.3, 3.2], [1.05, 4.6], [0.8, 5]].map(([r, y]) => new THREE.Vector2(r, y));
+  const prof = [[0, -5.2], [0.35, -4.8], [0.85, -3.6], [1.2, -1.5], [1.35, 0.8], [1.3, 3.2], [1.05, 4.6], [0.9, 4.95], [0.001, 4.95]].map(([r, y]) => new THREE.Vector2(r, y));
   const fus = new THREE.LatheGeometry(prof, 24).rotateX(Math.PI / 2).scale(1.15, 0.72, 1);
   g.add(new THREE.Mesh(fus, m.hull));
+  // rear bulkhead plate, matching the flattened fuselage section
+  const tail = new THREE.Mesh(new THREE.CircleGeometry(0.92, 32), m.tail);
+  tail.scale.set(1.15, 0.72, 1); tail.position.set(0, 0, 4.97);
+  g.add(tail);
+  // small APU exhaust in the middle of the bulkhead
+  const apu = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.3, 12).rotateX(Math.PI / 2), m.dark);
+  apu.position.set(0, -0.32, 5.05); g.add(apu);
 
   // swept wings: planform extruded with a bevel
   const wingShape = new THREE.Shape();
@@ -242,7 +287,9 @@ function makeShipMesh(base, accent, label) {
     const ring = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.09, 8, 20), m.dark);
     ring.position.set(side * 1.75, -0.15, 4.9); g.add(ring);
     const noz = new THREE.Mesh(new THREE.CircleGeometry(0.42, 20), m.nozzle);
-    noz.position.set(side * 1.75, -0.15, 4.92); g.add(noz);
+    noz.position.set(side * 1.75, -0.15, 4.93); g.add(noz);
+    const lip = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.46, 0.2, 20, 1, true).rotateX(Math.PI / 2), m.dark);
+    lip.position.set(side * 1.75, -0.15, 5.0); g.add(lip);
     const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
     glow.position.set(side * 1.75, -0.15, 5.6); g.add(glow);
     g.userData.glows.push(glow);
