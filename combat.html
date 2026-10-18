@@ -51,7 +51,7 @@ const DT = 1 / 60;
 const THRUST = 20, STRAFE = 10, ANG_ACC = 1.8, ANG_DAMP = 2.5, ASSIST_DAMP = 0.9;
 const LASER_RANGE = 1200, LASER_DMG = 8, LASER_COOLDOWN = 0.15;
 const MISSILE_SPEED = 140, MISSILE_TURN = 2.2, MISSILE_DMG = 70;
-const ENEMY = { speed: 55, turn: 1.3, cooldown: 0.5, dmg: 5, spread: 0.025, range: 900 };
+const ENEMY = { speed: 40, turn: 1.0, cooldown: 0.5, dmg: 5, spread: 0.025, range: 900 };
 const _x = new THREE.Vector3(1, 0, 0), _y = new THREE.Vector3(0, 1, 0), _z = new THREE.Vector3(0, 0, 1);
 
 // ---- renderer / scene ----
@@ -219,6 +219,7 @@ function fireLaser(shooter, spread, dmg, color) {
   const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
   if (spread) dir.add(new THREE.Vector3().randomDirection().multiplyScalar(spread)).normalize();
   const from = posOf(shooter).add(dir.clone().multiplyScalar(6));
+  if (shooter.kind === 'player') { const t = assistTarget(); if (t) dir.copy(posOf(t).sub(from).normalize()); }
   const hit = world.castRay(new RAPIER.Ray(from, dir), LASER_RANGE, true, undefined, undefined, undefined, shooter.body);
   const dist = hit ? (hit.toi ?? hit.timeOfImpact) : LASER_RANGE;
   beam(from, from.clone().add(dir.clone().multiplyScalar(dist)), color);
@@ -227,6 +228,21 @@ function fireLaser(shooter, spread, dmg, color) {
     const target = owners.get(hit.collider.handle);
     if (target && target.kind !== 'station' && target.alive) damage(target, dmg);
   }
+}
+// aim assist: the player's laser bends toward the enemy nearest the crosshair inside this cone
+const AIM_CONE = 0.14; // rad, about 8 degrees
+function assistTarget() {
+  if (!player?.alive) return null;
+  const p = posOf(player), fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(quatOf(player));
+  let best = null, bestAng = AIM_CONE;
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    const to = posOf(e).sub(p);
+    if (to.length() > LASER_RANGE) continue;
+    const a = fwd.angleTo(to);
+    if (a < bestAng) { bestAng = a; best = e; }
+  }
+  return best;
 }
 const missiles = [];
 const missileGeo = new THREE.ConeGeometry(0.6, 3, 6).rotateX(-Math.PI / 2);
@@ -435,7 +451,10 @@ function drawOverlay() {
     rc.fillRect(x - 3, y + h - 2, 6, 3);
   }
 
-  // boxes around enemies on screen
+  // boxes around enemies on screen, green when the laser will lock on
+  const locked = assistTarget();
+  const cr = Math.tan(AIM_CONE) / Math.tan(camera.fov * Math.PI / 360) * innerHeight / 2, cross = document.getElementById('cross');
+  Object.assign(cross.style, { width: `${cr * 2}px`, height: `${cr * 2}px`, margin: `-${cr}px`, borderColor: locked ? '#6f8' : 'rgba(100,255,140,.35)' });
   let i = 0;
   for (const e of enemies) {
     const p = posOf(e), sp = p.clone().project(camera);
@@ -444,6 +463,7 @@ function drawOverlay() {
     const on = sp.z < 1 && Math.abs(sp.x) < 1 && Math.abs(sp.y) < 1;
     div.style.display = on ? 'block' : 'none';
     div.style.left = `${(sp.x + 1) / 2 * innerWidth}px`; div.style.top = `${(1 - sp.y) / 2 * innerHeight}px`;
+    div.style.borderColor = div.style.color = e === locked ? '#6f8' : '#f86';
     div.firstChild.textContent = `${p.distanceTo(pp).toFixed(0)}m ${'|'.repeat(Math.ceil(e.hull / 10))}`;
     i++;
   }
