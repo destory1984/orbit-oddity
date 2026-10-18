@@ -479,9 +479,9 @@ function hiss(dur, vol) {
 let echoIn = null;
 function echoBus() {
   if (echoIn) return echoIn;
-  echoIn = ac.createGain(); echoIn.gain.value = 0.35;
+  echoIn = ac.createGain(); echoIn.gain.value = 0.12;
   const d = ac.createDelay(1), fb = ac.createGain(), lp = ac.createBiquadFilter();
-  d.delayTime.value = 0.13; fb.gain.value = 0.38; lp.type = 'lowpass'; lp.frequency.value = 1800;
+  d.delayTime.value = 0.09; fb.gain.value = 0.15; lp.type = 'lowpass'; lp.frequency.value = 1800;
   echoIn.connect(d); d.connect(lp).connect(fb).connect(d); lp.connect(master);
   return echoIn;
 }
@@ -494,11 +494,11 @@ function layer(type, f0, f1, dur, vol, attack = 0.004) {
 }
 function bigLaser() {
   if (!ac || muted) return;
-  layer('sine', 170, 42, 0.32, 0.32);         // low thump
-  layer('sawtooth', 900, 110, 0.26, 0.07);    // main zap
-  layer('square', 1800, 260, 0.14, 0.035);    // bright edge
-  layer('sawtooth', 452, 60, 0.3, 0.05);      // detuned body
-  noise(0.09, 0.12, 7000, 900);               // crack
+  layer('sawtooth', 1700, 230, 0.24, 0.11);   // main zap
+  layer('sawtooth', 1745, 236, 0.24, 0.07);   // detuned twin, makes it wide
+  layer('square', 2600, 420, 0.13, 0.05);     // bright edge
+  layer('sine', 240, 95, 0.12, 0.08);         // light body, not a thump
+  noise(0.05, 0.06, 9000, 3000);              // crack
 }
 // louder when closer to the player
 const nearVol = at => player?.alive ? Math.max(0.05, 1 - at.distanceTo(posOf(player)) / 1500) : 0.3;
